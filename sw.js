@@ -1,4 +1,4 @@
-const CACHE_NAME = 'my-library-v1';
+const CACHE_NAME = 'my-library-v5';
 const FILES_TO_CACHE = [
   './',
   './index.html',

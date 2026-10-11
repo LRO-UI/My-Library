@@ -1,21 +1,25 @@
 import { html, render, useState, useEffect, useRef, useMemo } from 'https://unpkg.com/htm@3.1.1/preact/standalone.module.js';
 import { db } from './db.js';
-import { SEED_BOOKS, SEED_AUDIO } from './seed.js';
+import { SEED_BOOKS, SEED_AUDIO, SEED_TAGS } from './seed.js';
 import { importBookFile, readAudioTracks, scaleImage, stripExt } from './importers.js';
 import { Player } from './player.js';
 
 // ===== Constants =====
-const PREFS_KEY = 'my-library-prefs-v1';  // { theme, fontSize, lastId }
+const PREFS_KEY = 'my-library-prefs-v1';  // { theme, fontSize, lastId, lastAudioId }
 const SCROLL_KEY = 'my-library-scroll-v1'; // { [bookId]: 0..1 } scroll position within the chapter
 const SWATCHES = [['Coral', '#E8605C'], ['Lavender', '#8C7BC4'], ['Sage', '#5BA56B'], ['Denim', '#46668F'], ['Teal', '#3E8A8C'], ['Honey', '#F2B33D'], ['Cocoa', '#8A6A5A'], ['Blush', '#E9A6A0']];
-const GENRES = [['Romance', '#E8605C'], ['Adventure', '#46668F'], ['Classic', '#8A6A5A'], ['Fantasy', '#8C7BC4'], ['Gothic', '#3E8A8C']];
 const EMPTY_CH = [{ title: 'Chapter 1', paras: ['This book has no content yet. Tap the pencil and import an EPUB or TXT file to start reading.'] }];
 const THEME_COLOR = { light: '#FBF8F3', dark: '#1E1916' };
+const TAG_MAX = 24;
+const AUDIO_FORMATS = 'MP3, M4A, M4B, OGG, Opus, FLAC or WAV';
 
 const newDraft = kind => kind === 'audio'
-  ? { id: null, kind, title: 'New audiobook', author: 'Author', color: '#8C7BC4', genre: 'Classic', image: '', showText: true, tracks: [], len: 0, pos: 0 }
-  : { id: null, kind, title: 'New book', author: 'Author', color: '#8C7BC4', genre: 'Classic', image: '', showText: true, chapter: 0 };
+  ? { id: null, kind, title: 'New audiobook', author: 'Author', color: '#8C7BC4', tags: [], image: '', showText: true, tracks: [], len: 0, pos: 0 }
+  : { id: null, kind, title: 'New book', author: 'Author', color: '#8C7BC4', tags: [], image: '', showText: true, chapter: 0 };
 const DEFAULT_TITLES = ['New book', 'New audiobook', ''];
+
+// Items saved before tags existed had a single `genre`.
+const withTags = ({ genre, ...item }) => ({ ...item, tags: item.tags || (genre ? [genre] : []) });
 
 // ===== Helpers =====
 const readJSON = (key, fallback) => { try { return { ...fallback, ...JSON.parse(localStorage.getItem(key)) }; } catch (e) { return fallback; } };
@@ -37,7 +41,7 @@ const fmtLeft = sec => {
 };
 const fmtDur = sec => (sec < 60 ? Math.round(sec) + 's' : fmtLeft(sec).replace(' left', ''));
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-const matches = (item, cat, q) => (cat === 'All' || item.genre === cat) && (!q || (item.title + ' ' + item.author).toLowerCase().includes(q));
+const matches = (item, cat, q) => (cat === 'All' || item.tags.includes(cat)) && (!q || [item.title, item.author, ...item.tags].join(' ').toLowerCase().includes(q));
 const stop = fn => e => { e.stopPropagation(); fn(e); };
 
 // ===== Icons (Lucide style) =====
@@ -62,11 +66,14 @@ const I = {
   trash: p => html`<${Svg} sw="2.2" ...${p}><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" /></${Svg}>`,
   sun: p => html`<${Svg} ...${p}><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></${Svg}>`,
   moon: p => html`<${Svg} ...${p}><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" /></${Svg}>`,
+  rewind: p => html`<${Svg} sw="2.2" ...${p}><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /></${Svg}>`,
+  forward: p => html`<${Svg} sw="2.2" ...${p}><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></${Svg}>`,
+  check: p => html`<${Svg} sw="2.6" ...${p}><path d="M20 6 9 17l-5-5" /></${Svg}>`,
   headphones: p => html`<${Svg} sw="2.4" ...${p}><path d="M3 18v-6a9 9 0 0 1 18 0v6" /><path d="M21 19a2 2 0 0 1-2 2h-1v-6h3zM3 19a2 2 0 0 0 2 2h1v-6H3z" /></${Svg}>`,
 };
 
 // ===== Covers =====
-function BookCover({ color = '#E8605C', image, title, author, showText = true, flat = false, ribbon = true }) {
+function BookCover({ color = '#E8605C', image, title, author, flat = false, ribbon = true }) {
   const c = rgb(color);
   const light = isLight(c);
   const [r, g, b] = c;
@@ -86,11 +93,6 @@ function BookCover({ color = '#E8605C', image, title, author, showText = true, f
           <div class="cover-frame">
             <div class="cover-title">${title || 'Untitled'}</div>
             <div class="cover-rule"></div>
-            <div class="cover-author">${author}</div>
-          </div>`}
-        ${image && showText && html`
-          <div class="cover-band">
-            <div class="cover-title">${title || 'Untitled'}</div>
             <div class="cover-author">${author}</div>
           </div>`}
       </div>
@@ -125,8 +127,9 @@ function App() {
   const [ready, setReady] = useState(false);
   const [books, setBooks] = useState([]);
   const [audio, setAudio] = useState([]);
-  const [prefs, setPrefs] = useState(() => readJSON(PREFS_KEY, { theme: 'light', fontSize: 19, lastId: 'b1' }));
-  const [view, setView] = useState('home');
+  const [tags, setTags] = useState([]); // [{ name, color }]
+  const [prefs, setPrefs] = useState(() => readJSON(PREFS_KEY, { theme: 'light', fontSize: 19, lastId: 'b1', lastAudioId: 'a1' }));
+  const [view, setView] = useState('books'); // 'books' | 'audio'
   const [readerId, setReaderId] = useState(null);
   const [query, setQuery] = useState('');
   const [cat, setCat] = useState('All');
@@ -135,9 +138,12 @@ function App() {
   const [typeShown, setTypeShown] = useState(false);
   const [playingId, setPlayingId] = useState(null);
   const [toast, setToast] = useState('');
+  const [tagInput, setTagInput] = useState(null); // null = closed, string = new tag name being typed
+  const [manageTags, setManageTags] = useState(false);
 
   const scrollRef = useRef(null);
   const readerRef = useRef(null);
+  const tagInputRef = useRef(null);
   const closeTimer = useRef(0);
   const pendingAudio = useRef(null); // File[] picked in the editor, written on Save
   const scrollPos = useRef(readJSON(SCROLL_KEY, {}));
@@ -151,16 +157,18 @@ function App() {
   // --- Load & persist ---
   useEffect(() => {
     (async () => {
-      let b = null, a = null;
-      try { [b, a] = await Promise.all([db.get('books'), db.get('audio')]); } catch (e) { console.warn('Could not open storage', e); }
-      setBooks(b || SEED_BOOKS);
-      setAudio(a || SEED_AUDIO);
+      let b = null, a = null, t = null;
+      try { [b, a, t] = await Promise.all([db.get('books'), db.get('audio'), db.get('tags')]); } catch (e) { console.warn('Could not open storage', e); }
+      setBooks((b || SEED_BOOKS).map(withTags));
+      setAudio((a || SEED_AUDIO).map(withTags));
+      setTags(t || SEED_TAGS);
       setReady(true);
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
     })();
   }, []);
 
   useEffect(() => { if (ready) db.set('books', books).catch(e => console.warn(e)); }, [books]);
+  useEffect(() => { if (ready) db.set('tags', tags).catch(e => console.warn(e)); }, [tags]);
 
   // Audio positions change every second while playing, so saves are batched.
   const audioSaveTimer = useRef(0);
@@ -182,6 +190,7 @@ function App() {
   }, [prefs]);
 
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = 0; }, [view]);
+  useEffect(() => { if (tagInput === '' && tagInputRef.current) tagInputRef.current.focus(); }, [tagInput === '']);
 
   const flash = msg => { setToast(msg); setTimeout(() => setToast(t => (t === msg ? '' : t)), 2600); };
 
@@ -199,7 +208,7 @@ function App() {
   const layers = useRef([]);
   const closers = useRef({});
   closers.current = {
-    library: () => setView('home'),
+    audio: () => { setView('books'); setCat('All'); },
     reader: () => { setReaderId(null); setTypeShown(false); },
     type: () => setTypeShown(false),
     editor: () => {
@@ -222,8 +231,8 @@ function App() {
   // --- Navigation ---
   const goView = v => {
     if (v === view) return;
-    if (v === 'library') { setView('library'); pushLayer('library'); }
-    else popLayer('library');
+    if (v === 'audio') { setView('audio'); setCat('All'); pushLayer('audio'); }
+    else popLayer('audio');
   };
   const openBook = id => {
     setReaderId(id);
@@ -261,13 +270,46 @@ function App() {
   const toggleAudio = async a => {
     if (playingId === a.id) { player.pause(); return; }
     if (!a.tracks || !a.tracks.length) { flash('Add an audio file to play this CD'); edit(a, 'audio'); return; }
+    setPref({ lastAudioId: a.id });
     try { await player.play(a); } catch (e) { if (e.name !== 'AbortError') flash(e.message); }
   };
+  const skip = (a, d) => {
+    if (player.item && player.item.id === a.id) { player.seek(player.pos() + d); return; }
+    if (!a.len) return;
+    setAudio(list => list.map(x => (x.id === a.id ? { ...x, pos: Math.max(0, Math.min(x.len, x.pos + d)) } : x)));
+  };
+
+  // --- Tags ---
+  const addTag = () => {
+    const name = (tagInput || '').trim().slice(0, TAG_MAX);
+    if (!name) { setTagInput(null); return; }
+    const existing = tags.find(t => t.name.toLowerCase() === name.toLowerCase());
+    const finalName = existing ? existing.name : name;
+    if (!existing) {
+      const used = tags.map(t => t.color.toLowerCase());
+      const free = SWATCHES.find(([, h]) => !used.includes(h.toLowerCase()));
+      setTags(list => [...list, { name, color: (free || SWATCHES[list.length % SWATCHES.length])[1] }]);
+    }
+    setDraft(d => (d.tags.includes(finalName) ? d : { ...d, tags: [...d.tags, finalName] }));
+    setTagInput(null);
+  };
+  const deleteTag = name => {
+    if (!confirm(`Delete the tag “${name}”? It will be removed from every book and audiobook.`)) return;
+    const strip = list => list.map(x => (x.tags.includes(name) ? { ...x, tags: x.tags.filter(t => t !== name) } : x));
+    setTags(list => list.filter(t => t.name !== name));
+    setBooks(strip);
+    setAudio(strip);
+    setDraft(d => d && { ...d, tags: d.tags.filter(t => t !== name) });
+    if (cat === name) setCat('All');
+  };
+  const toggleDraftTag = name => setDraft(d => ({ ...d, tags: d.tags.includes(name) ? d.tags.filter(t => t !== name) : [...d.tags, name] }));
 
   // --- Editor ---
   const edit = (item, kind = 'book') => {
     clearTimeout(closeTimer.current);
     pendingAudio.current = null;
+    setTagInput(null);
+    setManageTags(false);
     setDraft(item ? { ...item, kind } : newDraft(kind));
     setSheetShown(false);
     requestAnimationFrame(() => requestAnimationFrame(() => setSheetShown(true)));
@@ -279,7 +321,7 @@ function App() {
     if (d.kind === kind) return d;
     pendingAudio.current = null;
     const fresh = newDraft(kind);
-    return { ...fresh, title: DEFAULT_TITLES.includes(d.title) ? fresh.title : d.title, author: d.author, color: d.color, genre: d.genre, image: d.image, showText: d.showText };
+    return { ...fresh, title: DEFAULT_TITLES.includes(d.title) ? fresh.title : d.title, author: d.author, color: d.color, tags: d.tags, image: d.image, showText: d.showText };
   });
 
   const onImageFile = async e => {
@@ -308,18 +350,23 @@ function App() {
   };
 
   const onAudioFiles = async e => {
-    const files = [...(e.target.files || [])].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    const picked = [...(e.target.files || [])].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
     e.target.value = '';
-    if (!files.length) return;
+    if (!picked.length) return;
     setToast('Reading audio…');
-    const tracks = await readAudioTracks(files);
+    // Files the browser can't decode report no duration; leave them out.
+    const read = await readAudioTracks(picked);
+    const files = picked.filter((f, i) => read[i].dur > 0);
+    const tracks = read.filter(t => t.dur > 0);
+    if (!files.length) { flash(`Can't play that file. Use ${AUDIO_FORMATS}.`); return; }
+    if (files.length < picked.length) flash(`Skipped ${plural(picked.length - files.length, 'file', 'files')} that can't be played`);
+    else setToast('');
     pendingAudio.current = files;
     const guess = files.length === 1 ? stripExt(files[0].name) : stripExt(files[0].name).replace(/[\s\-_.]*\d+$/, '');
     setDraft(d => ({
       ...d, tracks, pos: 0, len: tracks.reduce((s, t) => s + t.dur, 0),
       title: DEFAULT_TITLES.includes(d.title) && guess ? guess : d.title,
     }));
-    setToast('');
   };
 
   const saveEdit = async () => {
@@ -344,6 +391,7 @@ function App() {
       }
       const rec = { ...item, id };
       setAudio(list => (item.id ? list.map(a => (a.id === id ? rec : a)) : [...list, rec]));
+      if (!item.id) setPref({ lastAudioId: id });
     }
     closeEdit();
   };
@@ -366,32 +414,156 @@ function App() {
   if (!ready) return html`<div class="shell"></div>`;
 
   // --- Derived ---
-  const isHome = view === 'home';
+  const isBooks = view === 'books';
   const q = query.trim().toLowerCase();
+  const items = isBooks ? books : audio;
+  const usedTags = tags.filter(t => items.some(x => x.tags.includes(t.name)));
   const all = books.map(vm);
   const shelf = all.filter(b => matches(b, cat, q));
   const current = all.find(b => b.id === prefs.lastId) || all[0];
   const audioList = audio.filter(a => matches(a, cat, q));
+  const nowAudio = audio.find(a => a.id === playingId) || audio.find(a => a.id === prefs.lastAudioId) || audio[0];
   const rb = readerId && all.find(b => b.id === readerId);
-  const showCarousel = isHome && shelf.length > 0;
-  const showGrid = !isHome;
+  const filtering = !!q || cat !== 'All';
 
   // --- Pieces ---
   const editBadge = (onClick, size = 13) => html`
-    <button class="badge-edit" title="Edit cover" onClick=${stop(onClick)}><${I.pencil} size=${size} sw="2.4" /></button>`;
+    <button class="badge-edit" title="Edit" onClick=${stop(onClick)}><${I.pencil} size=${size} sw="2.4" /></button>`;
 
-  const chips = (active, onPick, withAll) => (withAll ? [['All', '#F2B33D'], ...GENRES] : GENRES).map(([label, dot]) => html`
-    <button class=${'chip' + (active === label ? ' on' : '')} onClick=${() => onPick(label)}>
-      ${withAll && html`<span class="chip-dot" style=${{ background: dot }}></span>`}
-      ${label}
+  const filterChips = () => [{ name: 'All', color: '#F2B33D' }, ...usedTags].map(t => html`
+    <button class=${'chip' + (cat === t.name ? ' on' : '')} onClick=${() => setCat(t.name)}>
+      <span class="chip-dot" style=${{ background: t.color }}></span>
+      ${t.name}
     </button>`);
+
+  const audioStatus = (a, playing) => {
+    if (!a.len) return 'No audio yet';
+    if (a.pos >= a.len) return 'Finished';
+    if (playing) return 'Playing · ' + fmtLeft(a.len - a.pos);
+    return a.pos === 0 ? 'Not started · ' + fmtLeft(a.len) : fmtLeft(a.len - a.pos);
+  };
+  const audioPct = a => (a.len ? Math.round((a.pos / a.len) * 100) : 0) + '%';
+
+  const renderBooks = () => html`
+    ${current && !filtering && html`
+      <section class="continue">
+        <div class="cover-tap" onClick=${() => openBook(current.id)}>
+          <${BookCover} ...${current} />
+        </div>
+        <div class="continue-body">
+          <div class="kicker">Continue reading</div>
+          <div style="display:flex; flex-direction:column; gap:3px; min-width:0;">
+            <h2>${current.title}</h2>
+            <div class="author" style="font-size:13px;">${current.author}</div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:6px;">
+            <div class="bar" style="height:8px;"><span style=${{ width: current.pct }}></span></div>
+            <div class="caption">${current.pct} · ${current.chapterLabel}</div>
+          </div>
+          <div class="btn-row">
+            <button class="btn-coral" style="flex:1;" onClick=${() => openBook(current.id)}><${I.play} size="14" /> Keep reading</button>
+            <button class="btn-round surface" title="Edit" onClick=${() => edit(current)}><${I.pencil} size="16" /></button>
+          </div>
+        </div>
+      </section>`}
+
+    <section class="section">
+      <div class="section-hd">
+        <h2>${filtering ? plural(shelf.length, 'result', 'results') : plural(books.length, 'book', 'books')}</h2>
+      </div>
+      <div class="grid">
+        ${!filtering && html`
+          <button class="add-tile" onClick=${() => edit(null, 'book')}>
+            <span class="plus"><${I.plus} size="18" /></span>
+            <span>Add a book</span>
+          </button>`}
+        ${shelf.map(b => html`
+          <div class="grid-card" key=${b.id}>
+            <div class="cover-tap press" onClick=${() => openBook(b.id)}>
+              <${BookCover} ...${b} />
+              ${editBadge(() => edit(b), 12)}
+            </div>
+            <div class="card-text">
+              <div class="t ellipsis">${b.title}</div>
+              <div class="a author ellipsis">${b.author}</div>
+            </div>
+            <div class="bar"><span style=${{ width: b.pct }}></span></div>
+          </div>`)}
+      </div>
+      ${filtering && !shelf.length && html`<div class="empty">No books found. Try another search or tag.</div>`}
+    </section>`;
+
+  const renderAudio = () => {
+    const a = nowAudio;
+    const playing = a && playingId === a.id;
+    return html`
+      ${a && !filtering && html`
+        <section class="continue listen">
+          <div class="cover-tap press" onClick=${() => toggleAudio(a)}>
+            <${CdCase} ...${a} playing=${playing} badge=${false} />
+          </div>
+          <div class="continue-body">
+            <div class="kicker">${playing ? 'Now playing' : 'Continue listening'}</div>
+            <div style="display:flex; flex-direction:column; gap:3px; min-width:0;">
+              <h2>${a.title}</h2>
+              <div class="author" style="font-size:13px;">${a.author}</div>
+            </div>
+            <div style="display:flex; flex-direction:column; gap:6px;">
+              <div class="bar" style="height:8px;"><span style=${{ width: audioPct(a), transition: 'width 400ms ease' }}></span></div>
+              <div class="caption">${audioPct(a)} · ${audioStatus(a, false)}</div>
+            </div>
+            <div class="btn-row">
+              <button class="btn-round surface" title="Back 15 seconds" onClick=${() => skip(a, -15)}><${I.rewind} size="18" /></button>
+              <button class=${'btn-coral' + (playing ? ' lav' : '')} style="flex:1;" onClick=${() => toggleAudio(a)}>
+                ${playing ? html`<${I.pause} size="14" /> Pause` : html`<${I.play} size="14" /> Play`}
+              </button>
+              <button class="btn-round surface" title="Forward 30 seconds" onClick=${() => skip(a, 30)}><${I.forward} size="18" /></button>
+            </div>
+          </div>
+        </section>`}
+
+      <section class="section">
+        <div class="section-hd">
+          <h2>${filtering ? plural(audioList.length, 'result', 'results') : plural(audio.length, 'CD', 'CDs')}</h2>
+        </div>
+        <div class="grid cds">
+          ${!filtering && html`
+            <button class="add-tile square" onClick=${() => edit(null, 'audio')}>
+              <span class="plus"><${I.plus} size="18" /></span>
+              <span>Add an audiobook</span>
+            </button>`}
+          ${audioList.map(x => {
+            const on = playingId === x.id;
+            return html`
+              <div class="audio-card" key=${x.id}>
+                <div class="cover-tap press" title=${on ? 'Pause' : 'Play'} onClick=${() => toggleAudio(x)}>
+                  <${CdCase} ...${x} playing=${on} />
+                  ${editBadge(() => edit(x, 'audio'))}
+                  <span class=${'play-btn' + (on ? ' playing' : '')}>
+                    ${on ? html`<${I.pause} size="14" />` : html`<${I.play} size="14" />`}
+                  </span>
+                </div>
+                <div class="card-text">
+                  <div class="t ellipsis">${x.title}</div>
+                  <div class="a author ellipsis">${x.author}</div>
+                </div>
+                <div class="audio-meta">
+                  <div class="bar"><span style=${{ width: audioPct(x) }}></span></div>
+                  <span class=${'status' + (on ? ' playing' : '')}>${audioStatus(x, on)}</span>
+                </div>
+              </div>`;
+          })}
+        </div>
+        ${filtering && !audioList.length && html`<div class="empty">No audiobooks found. Try another search or tag.</div>`}
+      </section>`;
+  };
 
   const renderShelfView = () => html`
     <div class="scroll hide-scroll" ref=${scrollRef}>
       <header class="hdr">
         <div class="hdr-left">
-          <div class="brand"><${I.book} size="19" /></div>
-          <h1>${isHome ? 'Reading' : 'Library'}</h1>
+          <div class="brand">${isBooks ? html`<${I.book} size="19" />` : html`<${I.headphones} size="19" sw="2" />`}</div>
+          <h1>${isBooks ? 'Reading' : 'Listening'}</h1>
         </div>
         <button class="theme-btn" title="Toggle theme" onClick=${() => setPref({ theme: isDark ? 'light' : 'dark' })}>
           ${isDark ? html`<${I.sun} size="19" />` : html`<${I.moon} size="19" />`}
@@ -400,132 +572,27 @@ function App() {
 
       <label class="search">
         <${I.search} size="19" />
-        <input value=${query} onInput=${e => setQuery(e.target.value)} placeholder="Search for books" type="search" enterkeyhint="search" />
+        <input value=${query} onInput=${e => setQuery(e.target.value)} placeholder=${isBooks ? 'Search books, authors or tags' : 'Search audiobooks'} type="search" enterkeyhint="search" />
         ${query && html`<button class="search-clear" title="Clear" onClick=${e => { e.preventDefault(); setQuery(''); }}><${I.x} size="12" /></button>`}
       </label>
 
-      <div class="chips bleed hide-scroll">${chips(cat, setCat, true)}</div>
+      ${usedTags.length > 0 && html`<div class="chips bleed hide-scroll">${filterChips()}</div>`}
 
-      ${isHome && current && !q && cat === 'All' && html`
-        <section class="continue">
-          <div class="cover-tap" onClick=${() => openBook(current.id)}>
-            <${BookCover} ...${current} />
-          </div>
-          <div class="continue-body">
-            <div class="kicker">Continue reading</div>
-            <div style="display:flex; flex-direction:column; gap:3px; min-width:0;">
-              <h2>${current.title}</h2>
-              <div class="author" style="font-size:13px;">${current.author}</div>
-            </div>
-            <div style="display:flex; flex-direction:column; gap:6px;">
-              <div class="bar" style="height:8px;"><span style=${{ width: current.pct }}></span></div>
-              <div class="caption">${current.pct} · ${current.chapterLabel}</div>
-            </div>
-            <div class="btn-row">
-              <button class="btn-coral" style="flex:1;" onClick=${() => openBook(current.id)}><${I.play} size="14" /> Keep reading</button>
-              <button class="btn-round surface" title="Edit cover" onClick=${() => edit(current)}><${I.pencil} size="16" /></button>
-            </div>
-          </div>
-        </section>`}
-
-      <section class="section">
-        <div class="section-hd">
-          <h2>${isHome ? 'Your shelf' : plural(books.length, 'book', 'books')}</h2>
-          ${isHome && html`<button class="pill" onClick=${() => goView('library')}>View all</button>`}
-        </div>
-
-        ${showCarousel && html`
-          <div class="carousel bleed hide-scroll">
-            ${shelf.map(b => html`
-              <div class="shelf-card" key=${b.id}>
-                <div class="cover-tap press" onClick=${() => openBook(b.id)}>
-                  <${BookCover} ...${b} />
-                  ${editBadge(() => edit(b))}
-                </div>
-                <div class="card-text">
-                  <div class="t ellipsis">${b.title}</div>
-                  <div class="a author ellipsis">${b.author}</div>
-                </div>
-                <div class="pct-row">
-                  <div class="bar"><span style=${{ width: b.pct }}></span></div>
-                  <span class="lbl">${b.pct}</span>
-                </div>
-              </div>`)}
-          </div>`}
-
-        ${showGrid && html`
-          <div class="grid">
-            <button class="add-tile" onClick=${() => edit(null)}>
-              <span class="plus"><${I.plus} size="18" /></span>
-              <span>Add a book</span>
-            </button>
-            ${shelf.map(b => html`
-              <div class="grid-card" key=${b.id}>
-                <div class="cover-tap press" onClick=${() => openBook(b.id)}>
-                  <${BookCover} ...${b} />
-                  ${editBadge(() => edit(b), 12)}
-                </div>
-                <div class="card-text">
-                  <div class="t ellipsis">${b.title}</div>
-                  <div class="a author ellipsis">${b.author}</div>
-                </div>
-                <div class="bar"><span style=${{ width: b.pct }}></span></div>
-              </div>`)}
-          </div>`}
-
-        ${shelf.length === 0 && isHome && html`<div class="empty">No books found. Try another search or category.</div>`}
-      </section>
-
-      ${isHome && audioList.length > 0 && html`
-        <section class="section" style="gap:0;">
-          <div class="section-hd">
-            <h2>Audiobooks</h2>
-            <span class="pill muted"><${I.headphones} size="14" /> ${plural(audioList.length, 'CD', 'CDs')}</span>
-          </div>
-          <div class="carousel audio-row bleed hide-scroll">
-            ${audioList.map(a => {
-              const playing = playingId === a.id;
-              const done = a.len > 0 && a.pos >= a.len;
-              const status = !a.len ? 'No audio yet'
-                : done ? 'Finished'
-                : playing ? 'Playing · ' + fmtLeft(a.len - a.pos)
-                : a.pos === 0 ? 'Not started · ' + fmtLeft(a.len)
-                : fmtLeft(a.len - a.pos);
-              return html`
-                <div class="audio-card" key=${a.id}>
-                  <div class="cover-tap press" title=${playing ? 'Pause' : 'Play'} onClick=${() => toggleAudio(a)}>
-                    <${CdCase} ...${a} playing=${playing} />
-                    ${editBadge(() => edit(a, 'audio'))}
-                    <span class=${'play-btn' + (playing ? ' playing' : '')}>
-                      ${playing ? html`<${I.pause} size="14" />` : html`<${I.play} size="14" />`}
-                    </span>
-                  </div>
-                  <div class="card-text">
-                    <div class="t ellipsis">${a.title}</div>
-                    <div class="a author ellipsis">${a.author}</div>
-                  </div>
-                  <div class="audio-meta">
-                    <div class="bar"><span style=${{ width: (a.len ? Math.round((a.pos / a.len) * 100) : 0) + '%' }}></span></div>
-                    <span class=${'status' + (playing ? ' playing' : '')}>${status}</span>
-                  </div>
-                </div>`;
-            })}
-          </div>
-        </section>`}
+      ${isBooks ? renderBooks() : renderAudio()}
     </div>
 
     <nav class="tabbar">
       <div>
-        <button class=${'tab' + (isHome ? ' on' : '')} onClick=${() => goView('home')}>
-          <span class="ico"><${I.grid} /></span><span>Home</span>
+        <button class=${'tab' + (isBooks ? ' on' : '')} onClick=${() => goView('books')}>
+          <span class="ico"><${I.bookmark} /></span><span>Books</span>
         </button>
       </div>
       <div>
-        <button class="fab" title="New" onClick=${() => edit(null)}><${I.plus} size="22" /></button>
+        <button class="fab" title=${isBooks ? 'New book' : 'New audiobook'} onClick=${() => edit(null, isBooks ? 'book' : 'audio')}><${I.plus} size="22" /></button>
       </div>
       <div>
-        <button class=${'tab' + (!isHome ? ' on' : '')} onClick=${() => goView('library')}>
-          <span class="ico"><${I.bookmark} /></span><span>Library</span>
+        <button class=${'tab' + (!isBooks ? ' on' : '')} onClick=${() => goView('audio')}>
+          <span class="ico"><${I.headphones} size="20" sw="2" /></span><span>Audio</span>
         </button>
       </div>
     </nav>`;
@@ -595,6 +662,39 @@ function App() {
       </div>`;
   };
 
+  const renderTagPicker = d => html`
+    <div class="field">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span class="label">Tags</span>
+        ${tags.length > 0 && html`
+          <button class="link-btn" onClick=${() => { setManageTags(m => !m); setTagInput(null); }}>${manageTags ? 'Done' : 'Edit tags'}</button>`}
+      </div>
+      <div class="chips-wrap">
+        ${tags.map(t => {
+          const on = d.tags.includes(t.name);
+          return manageTags
+            ? html`
+              <button class="chip removable" title=${'Delete ' + t.name} onClick=${() => deleteTag(t.name)}>
+                <span class="chip-dot" style=${{ background: t.color }}></span>${t.name}<${I.x} size="11" />
+              </button>`
+            : html`
+              <button class=${'chip' + (on ? ' on' : '')} aria-pressed=${on} onClick=${() => toggleDraftTag(t.name)}>
+                <span class="chip-dot" style=${{ background: t.color }}></span>${t.name}
+                ${on && html`<${I.check} size="13" sw="3" />`}
+              </button>`;
+        })}
+        ${!manageTags && tagInput === null && html`
+          <button class="chip dashed" onClick=${() => setTagInput('')}><${I.plus} size="13" /> New tag</button>`}
+      </div>
+      ${tagInput !== null && html`
+        <form class="tag-form" onSubmit=${e => { e.preventDefault(); addTag(); }}>
+          <input class="input" ref=${tagInputRef} value=${tagInput} maxlength=${TAG_MAX} placeholder="Tag name, e.g. To read"
+            onInput=${e => setTagInput(e.target.value)} enterkeyhint="done" />
+          <button type="button" class="btn-cancel" onClick=${() => setTagInput(null)}>Cancel</button>
+          <button type="submit" class="btn-save">Add</button>
+        </form>`}
+    </div>`;
+
   const renderEditor = () => {
     const d = draft;
     const isAudio = d.kind === 'audio';
@@ -608,7 +708,7 @@ function App() {
           <div class="grabber"></div>
           <div class="row">
             <button class="btn-cancel" onClick=${closeEdit}>Cancel</button>
-            <h3>${isNew ? (isAudio ? 'New audiobook' : 'New book') : 'Edit cover'}</h3>
+            <h3>${isNew ? (isAudio ? 'New audiobook' : 'New book') : isAudio ? 'Edit audiobook' : 'Edit book'}</h3>
             <button class="btn-save" onClick=${saveEdit}>Save</button>
           </div>
         </div>
@@ -656,9 +756,11 @@ function App() {
                 <span class="ico"><${I.music} /></span>
                 <span class="txt">
                   <b>${d.tracks && d.tracks.length ? 'Replace audio' : 'Add audio files'}</b>
-                  <small class="ellipsis">${d.tracks && d.tracks.length ? `${plural(d.tracks.length, 'track', 'tracks')} · ${fmtDur(d.len)}` : 'One file, or every track in order'}</small>
+                  ${d.tracks && d.tracks.length
+                    ? html`<small class="ellipsis">${plural(d.tracks.length, 'track', 'tracks')} · ${fmtDur(d.len)}</small>`
+                    : html`<small>${AUDIO_FORMATS}. One file, or every track in order.</small>`}
                 </span>
-                <input type="file" accept="audio/*,.m4b" multiple onChange=${onAudioFiles} />
+                <input type="file" accept="audio/*,.mp3,.m4a,.m4b,.aac,.ogg,.oga,.opus,.flac,.wav" multiple onChange=${onAudioFiles} />
               </label>
             </div>`}
 
@@ -669,13 +771,13 @@ function App() {
                 <span class="ico"><${I.upload} /></span>
                 <span class="txt">
                   <b>${d.image ? 'Replace image' : 'Upload an image'}</b>
-                  <small>From photos or files</small>
+                  <small>${isAudio ? 'Square, 700 × 700 px · shown as a disc' : 'Portrait, 550 × 700 px'}</small>
                 </span>
                 <input type="file" accept="image/*" onChange=${onImageFile} />
               </label>
               ${d.image && html`<button class="btn-trash" title="Remove image" onClick=${() => patchDraft({ image: '' })}><${I.trash} size="18" /></button>`}
             </div>
-            ${d.image && html`
+            ${d.image && isAudio && html`
               <button class="switch-row" onClick=${() => patchDraft({ showText: !d.showText })}>
                 Show title over the image
                 <span class=${'switch' + (d.showText ? ' on' : '')}></span>
@@ -698,10 +800,7 @@ function App() {
             </div>
           </div>
 
-          <div class="field">
-            <span class="label">Category</span>
-            <div class="chips-wrap">${chips(d.genre, g => patchDraft({ genre: g }), false)}</div>
-          </div>
+          ${renderTagPicker(d)}
 
           ${!isNew && html`<button class="btn-delete" onClick=${deleteItem}>${isAudio ? 'Delete audiobook' : 'Delete book'}</button>`}
         </div>

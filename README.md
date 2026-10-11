@@ -2,10 +2,10 @@
 
 A warm, cosy ebook reader with an audiobook shelf of CD cases, built as an installable PWA. It's based on the "Ebook Reader — Mobile (warm theme)" design handoff.
 
-- **Home**: continue-reading card, shelf carousel and the **Audiobooks** row of CD cases
-- **Library**: a grid of every book
+- **Books** tab: continue-reading card and a grid of every book
+- **Audio** tab: continue-listening card (play, back 15s, forward 30s) and a grid of CD cases
 - **Reader**: chapters, text size and light/dark theme
-- **Cover editor**: title, author, cover image, colour and category
+- **Cover editor**: title, author, cover image, colour and tags (several per item; create your own, delete any via "Edit tags")
   - **Books:** import **EPUB** or **TXT** files (Project Gutenberg headers are stripped automatically)
   - **Audiobooks:** add one audio file or every track in order. The tracks play as one timeline, with lock-screen controls (Media Session).
 
