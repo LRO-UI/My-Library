@@ -1,6 +1,6 @@
-import { html, render, useState, useEffect, useRef, useMemo } from 'https://unpkg.com/htm@3.1.1/preact/standalone.module.js';
+import { html, render, Component, useState, useEffect, useRef, useMemo } from 'https://unpkg.com/htm@3.1.1/preact/standalone.module.js';
 import { db } from './db.js';
-import { SEED_BOOKS, SEED_AUDIO, SEED_TAGS } from './seed.js';
+import { SEED_BOOKS, SEED_AUDIO, SEED_TAGS, RETIRED_SEEDS } from './seed.js';
 import { importBookFile, readAudioTracks, scaleImage, stripExt } from './importers.js';
 import { Player } from './player.js';
 import { exportBackup, readBackup, backupName, download } from './backup.js';
@@ -14,6 +14,9 @@ const THEME_COLOR = { light: '#FBF8F3', dark: '#1E1916' };
 const TAG_MAX = 24;
 const AUDIO_FORMATS = 'MP3, M4A, M4B, OGG, Opus, FLAC or WAV';
 const SHARE_KEY = 'share:pending'; // files handed over by the share target (see sw.js)
+const TEXT_KEY = id => 'text:' + id; // a book's chapters live in their own record, loaded when it is opened
+const SEED_VERSION = 2;              // bump when samples change; see RETIRED_SEEDS
+const TEXT_CACHE_SIZE = 3;
 const isBookFile = f => /\.(epub|txt)$/i.test(f.name) || f.type === 'application/epub+zip' || f.type === 'text/plain';
 const isAudioFile = f => f.type.startsWith('audio/') || /\.(mp3|m4a|m4b|aac|ogg|oga|opus|flac|wav)$/i.test(f.name);
 const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true });
@@ -27,6 +30,8 @@ const DEFAULT_TITLES = ['New book', 'New audiobook', ''];
 
 // Items saved before tags existed had a single `genre`.
 const withTags = ({ genre, ...item }) => ({ ...item, tags: item.tags || (genre ? [genre] : []) });
+// Book records keep only a chapter count; the chapters themselves are stored under TEXT_KEY.
+const withoutText = ({ chapters, ...book }) => (chapters ? { ...book, chCount: chapters.length } : book);
 
 // ===== Helpers =====
 const readJSON = (key, fallback) => { try { return { ...fallback, ...JSON.parse(localStorage.getItem(key)) }; } catch (e) { return fallback; } };
@@ -57,7 +62,6 @@ const Svg = ({ size = 20, sw = 2, fill, children }) => html`
     stroke-width=${sw} stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${children}</svg>`;
 const I = {
   book: p => html`<${Svg} ...${p}><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></${Svg}>`,
-  grid: p => html`<${Svg} ...${p}><rect x="3" y="3" width="7.5" height="7.5" rx="2" /><rect x="13.5" y="3" width="7.5" height="7.5" rx="2" /><rect x="3" y="13.5" width="7.5" height="7.5" rx="2" /><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2" /></${Svg}>`,
   bookmark: p => html`<${Svg} ...${p}><path d="M6 3h12v18l-6-4-6 4z" /></${Svg}>`,
   plus: p => html`<${Svg} sw="2.6" ...${p}><path d="M12 5v14M5 12h14" /></${Svg}>`,
   search: p => html`<${Svg} sw="2.2" ...${p}><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></${Svg}>`,
@@ -83,7 +87,7 @@ const I = {
 };
 
 // ===== Covers =====
-function BookCover({ color = '#E8605C', image, title, author, flat = false, ribbon = true }) {
+function BookCover({ color = '#E8605C', image, title, author, ribbon = true }) {
   const c = rgb(color);
   const light = isLight(c);
   const [r, g, b] = c;
@@ -95,8 +99,8 @@ function BookCover({ color = '#E8605C', image, title, author, flat = false, ribb
     '--ribbon': amber ? '#E8605C' : '#F2B33D',
   };
   return html`
-    <div class=${'cover' + (flat ? ' flat' : '')} style=${vars}>
-      ${!flat && html`<div class="cover-pages"></div>`}
+    <div class="cover" style=${vars}>
+      <div class="cover-pages"></div>
       <div class="cover-face">
         ${image && html`<div class="cover-img" style=${{ backgroundImage: `url("${image}")` }}></div>`}
         ${!image && html`
@@ -132,6 +136,15 @@ function CdCase({ color = '#8C7BC4', image, title, showText = true, badge = true
     </div>`;
 }
 
+// The chapter text. The app re-renders every second while an audiobook plays,
+// so this skips re-diffing what can be hundreds of paragraphs.
+class Prose extends Component {
+  shouldComponentUpdate(next) { return next.paras !== this.props.paras || next.size !== this.props.size; }
+  render({ paras, size }) {
+    return html`<div class="prose" style=${{ fontSize: size + 'px' }}>${paras.map(p => html`<p>${p}</p>`)}</div>`;
+  }
+}
+
 // ===== App =====
 function App() {
   const [ready, setReady] = useState(false);
@@ -153,6 +166,7 @@ function App() {
   const [libShown, setLibShown] = useState(false);
   const [withAudio, setWithAudio] = useState(true);
   const [usage, setUsage] = useState(null); // bytes used by the app, from navigator.storage
+  const [text, setText] = useState(null);   // { id, chapters } for the book open in the reader
 
   const scrollRef = useRef(null);
   const readerRef = useRef(null);
@@ -161,6 +175,7 @@ function App() {
   const pendingAudio = useRef(null); // File[] picked in the editor, written on Save
   const scrollPos = useRef(readJSON(SCROLL_KEY, {}));
   const scrollSaveTimer = useRef(0);
+  const textCache = useRef(new Map()); // recently opened books' chapters
   const audioRef = useRef(audio);
   audioRef.current = audio;
 
@@ -170,10 +185,25 @@ function App() {
   // --- Load & persist ---
   useEffect(() => {
     (async () => {
-      let b = null, a = null, t = null;
-      try { [b, a, t] = await Promise.all([db.get('books'), db.get('audio'), db.get('tags')]); } catch (e) { console.warn('Could not open storage', e); }
-      setBooks((b || SEED_BOOKS).map(withTags));
-      setAudio((a || SEED_AUDIO).map(withTags));
+      let b = null, a = null, t = null, seedVersion = null;
+      try { [b, a, t, seedVersion] = await Promise.all([db.get('books'), db.get('audio'), db.get('tags'), db.get('seedVersion')]); } catch (e) { console.warn('Could not open storage', e); }
+      let bookList = (b || SEED_BOOKS).map(withTags);
+      let audioList = (a || SEED_AUDIO).map(withTags);
+      try {
+        // Older installs: drop sample items that were never edited.
+        if (b && seedVersion !== SEED_VERSION) {
+          const retired = x => RETIRED_SEEDS.includes(x.id) && !x.image && !x.source && !(x.tracks && x.tracks.length);
+          const gone = bookList.filter(retired).map(x => x.id);
+          bookList = bookList.filter(x => !retired(x));
+          audioList = audioList.filter(x => !retired(x));
+          await Promise.all(gone.map(id => db.del(TEXT_KEY(id))));
+        }
+        // Move chapter text out of the book records (first run, or data from before v2).
+        await Promise.all(bookList.filter(x => x.chapters).map(x => db.set(TEXT_KEY(x.id), x.chapters)));
+        await db.set('seedVersion', SEED_VERSION);
+      } catch (e) { console.warn('Migration failed', e); }
+      setBooks(bookList.map(withoutText));
+      setAudio(audioList);
       setTags(t || SEED_TAGS);
       setReady(true);
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
@@ -259,6 +289,8 @@ function App() {
   };
   const openBook = id => {
     setReaderId(id);
+    setText(null);
+    getText(id).then(chapters => setText({ id, chapters }));
     setPref({ lastId: id });
     setTypeShown(false);
     pushLayer('reader');
@@ -270,11 +302,27 @@ function App() {
     if (navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then(e => setUsage(e.usage)).catch(() => {});
   };
 
+  // --- Book text ---
+  const cacheText = (id, chapters) => {
+    const cache = textCache.current;
+    cache.delete(id);
+    cache.set(id, chapters);
+    if (cache.size > TEXT_CACHE_SIZE) cache.delete(cache.keys().next().value);
+  };
+  const getText = async id => {
+    if (textCache.current.has(id)) return textCache.current.get(id);
+    const chapters = (await db.get(TEXT_KEY(id)).catch(() => null)) || null;
+    cacheText(id, chapters);
+    return chapters;
+  };
+  const saveText = async (id, chapters) => { await db.set(TEXT_KEY(id), chapters); cacheText(id, chapters); };
+  const dropText = id => { textCache.current.delete(id); delete scrollPos.current[id]; return db.del(TEXT_KEY(id)); };
+
   // --- Reader ---
   const vm = b => {
-    const chs = b.chapters && b.chapters.length ? b.chapters : EMPTY_CH;
-    const ch = Math.min(b.chapter || 0, chs.length - 1);
-    return { ...b, chs, ch, pct: Math.round(((ch + 1) / chs.length) * 100) + '%', chapterLabel: `Chapter ${ch + 1} of ${chs.length}` };
+    const count = b.chCount || 1;
+    const ch = Math.min(b.chapter || 0, count - 1);
+    return { ...b, count, ch, pct: Math.round(((ch + 1) / count) * 100) + '%', chapterLabel: `Chapter ${ch + 1} of ${count}` };
   };
   const setChapter = (id, ch) => {
     setBooks(list => list.map(b => (b.id === id ? { ...b, chapter: ch } : b)));
@@ -284,9 +332,9 @@ function App() {
   };
   useEffect(() => {
     const el = readerRef.current;
-    if (!readerId || !el) return;
-    requestAnimationFrame(() => { el.scrollTop = (scrollPos.current[readerId] || 0) * (el.scrollHeight - el.clientHeight); });
-  }, [readerId]);
+    if (!text || !el) return;
+    requestAnimationFrame(() => { el.scrollTop = (scrollPos.current[text.id] || 0) * (el.scrollHeight - el.clientHeight); });
+  }, [text]);
   const onReaderScroll = e => {
     const el = e.currentTarget;
     scrollPos.current[readerId] = el.scrollTop / Math.max(1, el.scrollHeight - el.clientHeight);
@@ -404,7 +452,14 @@ function App() {
     if (!d) return;
     const { kind, ...item } = d;
     if (kind === 'book') {
-      setBooks(list => (item.id ? list.map(b => (b.id === item.id ? item : b)) : [...list, { ...item, id: 'b' + Date.now() }]));
+      const id = item.id || 'b' + Date.now();
+      if (item.chapters) {
+        try { await saveText(id, item.chapters); } catch (err) { flash('Could not save the book: ' + err.message); return; }
+        scrollPos.current[id] = 0;
+        if (text && text.id === id) setText({ id, chapters: item.chapters });
+      }
+      const rec = { ...withoutText(item), id };
+      setBooks(list => (item.id ? list.map(b => (b.id === id ? rec : b)) : [...list, rec]));
     } else {
       const id = item.id || 'a' + Date.now();
       if (pendingAudio.current) {
@@ -432,6 +487,7 @@ function App() {
     if (d.kind === 'book') {
       const rest = books.filter(b => b.id !== d.id);
       setBooks(rest);
+      dropText(d.id).catch(e => console.warn(e));
       if (prefs.lastId === d.id) setPref({ lastId: rest[0] ? rest[0].id : null });
     } else {
       if (player.item && player.item.id === d.id) player.stop();
@@ -453,8 +509,10 @@ function App() {
     for (const [i, f] of bookFiles.entries()) {
       try {
         const r = await importBookFile(f);
-        newBooks.push({ id: 'b' + Date.now() + i, title: r.title, author: r.author || 'Unknown', color: SWATCHES[(books.length + i) % SWATCHES.length][1],
-          tags: [], image: r.image, showText: true, chapter: 0, chapters: r.chapters, source: f.name });
+        const id = 'b' + Date.now() + i;
+        await saveText(id, r.chapters);
+        newBooks.push({ id, title: r.title, author: r.author || 'Unknown', color: SWATCHES[(books.length + i) % SWATCHES.length][1],
+          tags: [], image: r.image, showText: true, chapter: 0, chCount: r.chapters.length, source: f.name });
       } catch (e) { console.warn(f.name, e); }
     }
     if (newBooks.length) { setBooks(list => [...list, ...newBooks]); added.push(plural(newBooks.length, 'book', 'books')); used += newBooks.length; }
@@ -486,7 +544,8 @@ function App() {
     try {
       let last = -1;
       const blob = await exportBackup({
-        books, audio, tags, scroll: scrollPos.current, includeAudio: withAudio,
+        books: await Promise.all(books.map(async b => ({ ...b, chapters: (await db.get(TEXT_KEY(b.id))) || undefined }))),
+        audio, tags, scroll: scrollPos.current, includeAudio: withAudio,
         onProgress: p => { const n = Math.floor(p / 10) * 10; if (n !== last) { last = n; setToast(`Preparing backup… ${n}%`); } },
       });
       download(blob, backupName());
@@ -526,7 +585,9 @@ function App() {
         const have = new Set(list.map(x => x.id));
         return [...list.map(x => byId[x.id] || x), ...incoming.filter(x => !have.has(x.id))];
       };
-      setBooks(list => merge(list, data.books.map(withTags)));
+      const restoredBooks = data.books.map(withTags);
+      for (const b of restoredBooks) if (b.chapters) await saveText(b.id, b.chapters);
+      setBooks(list => merge(list, restoredBooks.map(withoutText)));
       setAudio(list => merge(list, restoredAudio));
       setTags(list => [...list, ...data.tags.filter(t => !list.some(x => x.name.toLowerCase() === t.name.toLowerCase()))]);
       scrollPos.current = { ...scrollPos.current, ...data.scroll };
@@ -548,6 +609,7 @@ function App() {
   const audioList = audio.filter(a => matches(a, cat, q));
   const nowAudio = audio.find(a => a.id === playingId) || audio.find(a => a.id === prefs.lastAudioId) || audio[0];
   const rb = readerId && all.find(b => b.id === readerId);
+  const chapters = rb && text && text.id === rb.id ? (text.chapters && text.chapters.length ? text.chapters : EMPTY_CH) : null;
   const filtering = !!q || cat !== 'All';
 
   // --- Pieces ---
@@ -576,16 +638,16 @@ function App() {
         </div>
         <div class="continue-body">
           <div class="kicker">Continue reading</div>
-          <div style="display:flex; flex-direction:column; gap:3px; min-width:0;">
+          <div class="stack-3">
             <h2>${current.title}</h2>
-            <div class="author" style="font-size:13px;">${current.author}</div>
+            <div class="author sm">${current.author}</div>
           </div>
-          <div style="display:flex; flex-direction:column; gap:6px;">
-            <div class="bar" style="height:8px;"><span style=${{ width: current.pct }}></span></div>
+          <div class="stack-6">
+            <div class="bar lg"><span style=${{ width: current.pct }}></span></div>
             <div class="caption">${current.pct} · ${current.chapterLabel}</div>
           </div>
           <div class="btn-row">
-            <button class="btn-coral" style="flex:1;" onClick=${() => openBook(current.id)}><${I.play} size="14" /> Keep reading</button>
+            <button class="btn-coral" onClick=${() => openBook(current.id)}><${I.play} size="14" /> Keep reading</button>
             <button class="btn-round surface" title="Edit" onClick=${() => edit(current)}><${I.pencil} size="16" /></button>
           </div>
         </div>
@@ -628,17 +690,17 @@ function App() {
           </div>
           <div class="continue-body">
             <div class="kicker">${playing ? 'Now playing' : 'Continue listening'}</div>
-            <div style="display:flex; flex-direction:column; gap:3px; min-width:0;">
+            <div class="stack-3">
               <h2>${a.title}</h2>
-              <div class="author" style="font-size:13px;">${a.author}</div>
+              <div class="author sm">${a.author}</div>
             </div>
-            <div style="display:flex; flex-direction:column; gap:6px;">
-              <div class="bar" style="height:8px;"><span style=${{ width: audioPct(a), transition: 'width 400ms ease' }}></span></div>
+            <div class="stack-6">
+              <div class="bar lg live"><span style=${{ width: audioPct(a) }}></span></div>
               <div class="caption">${audioPct(a)} · ${audioStatus(a, false)}</div>
             </div>
             <div class="btn-row">
               <button class="btn-round surface" title="Back 15 seconds" onClick=${() => skip(a, -15)}><${I.rewind} size="18" /></button>
-              <button class=${'btn-coral' + (playing ? ' lav' : '')} style="flex:1;" onClick=${() => toggleAudio(a)}>
+              <button class=${'btn-coral' + (playing ? ' lav' : '')} onClick=${() => toggleAudio(a)}>
                 ${playing ? html`<${I.pause} size="14" /> Pause` : html`<${I.play} size="14" /> Play`}
               </button>
               <button class="btn-round surface" title="Forward 30 seconds" onClick=${() => skip(a, 30)}><${I.forward} size="18" /></button>
@@ -755,9 +817,9 @@ function App() {
     </div>`;
 
   const renderReader = () => {
-    const c = rb.chs[rb.ch];
+    const c = chapters && chapters[Math.min(rb.ch, chapters.length - 1)];
     const first = rb.ch === 0;
-    const last = rb.ch >= rb.chs.length - 1;
+    const last = rb.ch >= rb.count - 1;
     return html`
       <div class="reader">
         <div class="reader-top">
@@ -770,13 +832,12 @@ function App() {
         </div>
 
         <article class="article hide-scroll" ref=${readerRef} onScroll=${onReaderScroll}>
-          <div class="chapter-hd">
-            <div class="kicker">${rb.chapterLabel}</div>
-            <h2>${c.title}</h2>
-          </div>
-          <div class="prose" style=${{ fontSize: prefs.fontSize + 'px' }}>
-            ${c.paras.map(p => html`<p>${p}</p>`)}
-          </div>
+          ${c ? html`
+            <div class="chapter-hd">
+              <div class="kicker">${rb.chapterLabel}</div>
+              <h2>${c.title}</h2>
+            </div>
+            <${Prose} paras=${c.paras} size=${prefs.fontSize} />` : html`<div class="kicker">Opening…</div>`}
         </article>
 
         <footer class="reader-foot">
@@ -785,7 +846,7 @@ function App() {
             <div class="bar"><span style=${{ width: rb.pct }}></span></div>
             <div class="lbls"><span>${rb.chapterLabel}</span><span>${rb.pct}</span></div>
           </div>
-          <button class="btn-coral next-btn" title="Next chapter" disabled=${last} onClick=${() => setChapter(rb.id, Math.min(rb.chs.length - 1, rb.ch + 1))}>
+          <button class="btn-coral next-btn" title="Next chapter" disabled=${last} onClick=${() => setChapter(rb.id, Math.min(rb.count - 1, rb.ch + 1))}>
             Next <${I.chevR} size="18" />
           </button>
         </footer>
@@ -857,7 +918,7 @@ function App() {
     const isAudio = d.kind === 'audio';
     const isNew = !d.id;
     const preset = SWATCHES.some(([, h]) => h.toLowerCase() === d.color.toLowerCase());
-    const chCount = d.chapters ? d.chapters.length : 0;
+    const chCount = d.chapters ? d.chapters.length : d.source ? d.chCount : 0;
     return html`
       <div class=${'overlay blur' + (sheetShown ? ' on' : '')} onClick=${closeEdit}></div>
       <div class=${'edit-sheet' + (sheetShown ? ' on' : '')}>

@@ -87,7 +87,8 @@ function parseTxt(raw, fileName) {
   }
   // Headings with no text (e.g. a table of contents) are dropped.
   chapters = chapters.filter(c => c.paras.length);
-  if (chapters.length <= 1) chapters = chunk(blocks);
+  // No chapter headings found: split into equal parts instead.
+  if (!chapters.length || (chapters.length === 1 && chapters[0].title === 'Opening')) chapters = chunk(blocks);
 
   return { title: title.trim() || stripExt(fileName), author: author.trim(), image: '', chapters };
 }

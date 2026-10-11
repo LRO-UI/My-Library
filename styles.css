@@ -101,7 +101,7 @@ h1, h2, h3, p { margin: 0; }
   background: var(--coral); color: var(--on-accent);
   display: flex; align-items: center; justify-content: center;
 }
-.hdr h1 { font-size: 26px; font-weight: 700; white-space: nowrap; }
+.hdr h1 { font-size: clamp(21px, 6.8vw, 26px); font-weight: 700; white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .theme-btn {
   width: 44px; height: 44px; flex: none; border-radius: 999px;
   background: var(--denim); color: var(--on-accent);
@@ -154,7 +154,13 @@ h1, h2, h3, p { margin: 0; }
 .continue h2 { font-size: 19px; line-height: 1.2; font-weight: 700; text-wrap: balance; }
 .author { color: var(--coral); font-weight: 600; }
 .caption { font-size: 12px; font-weight: 600; color: var(--w-fg2); }
+.stack-3 { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.stack-6 { display: flex; flex-direction: column; gap: 6px; }
+.author.sm { font-size: 13px; }
+.bar.lg { height: 8px; }
+.bar.live > span { transition: width 400ms ease; }
 .btn-row { display: flex; gap: 8px; }
+.btn-row .btn-coral { flex: 1; min-width: 0; }
 .btn-coral {
   height: 44px; padding: 0 14px; border-radius: 999px;
   background: var(--coral); color: var(--on-accent);
@@ -175,27 +181,7 @@ h1, h2, h3, p { margin: 0; }
 .section { display: flex; flex-direction: column; gap: 16px; }
 .section-hd { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .section-hd h2 { font-size: 20px; font-weight: 700; }
-.pill {
-  height: 36px; padding: 0 16px; border-radius: 999px;
-  background: var(--w-card); color: var(--w-fg);
-  font-size: 13px; font-weight: 700;
-  display: flex; align-items: center; gap: 7px;
-}
-.pill.muted { padding: 0 14px; color: var(--w-fg2); }
-
-/* Carousel */
-.carousel {
-  display: flex; gap: 16px; overflow-x: auto;
-  padding-bottom: 4px;
-  scroll-snap-type: x mandatory; scroll-padding: 0 20px;
-}
-.shelf-card { width: 124px; flex: none; display: flex; flex-direction: column; gap: 10px; scroll-snap-align: start; }
 .card-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.shelf-card .t { font-size: 14px; font-weight: 700; line-height: 1.3; }
-.shelf-card .a { font-size: 12px; }
-.pct-row { display: flex; align-items: center; gap: 8px; }
-.pct-row .bar { flex: 1; height: 5px; }
-.pct-row span.lbl { font-size: 11px; font-weight: 700; color: var(--w-fg3); }
 
 .cover-tap { position: relative; cursor: pointer; }
 
@@ -210,7 +196,8 @@ h1, h2, h3, p { margin: 0; }
 .badge-edit::before { content: ''; position: absolute; inset: -8px; } /* 44pt hit area */
 
 /* Grid */
-.grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 22px 14px; }
+/* 3 columns on a normal phone, 2 when the screen is narrow (large Display size). */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 22px 14px; }
 .grid-card { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .grid-card .badge-edit { top: 5px; right: 5px; width: 28px; height: 28px; }
 .grid-card .t { font-size: 13px; font-weight: 700; line-height: 1.3; }
@@ -234,8 +221,7 @@ h1, h2, h3, p { margin: 0; }
 }
 
 /* Audiobooks */
-.audio-row { padding-top: 26px; }
-.audio-card { width: 150px; flex: none; display: flex; flex-direction: column; gap: 10px; scroll-snap-align: start; }
+.audio-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .audio-card .t { font-size: 14px; font-weight: 700; line-height: 1.3; }
 .audio-card .a { font-size: 12px; }
 .audio-meta { display: flex; flex-direction: column; gap: 5px; }
@@ -355,7 +341,8 @@ h1, h2, h3, p { margin: 0; }
 .edit-sheet.on { transform: translateY(0); }
 .edit-hd { flex: none; padding: 10px 20px 12px; display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--w-border); }
 .edit-hd .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.edit-hd h3 { font-size: 17px; font-weight: 700; }
+.edit-hd h3 { flex: 1; min-width: 0; text-align: center; font-size: 17px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.edit-hd .row > button { flex: none; }
 .btn-cancel { height: 40px; padding: 0 14px; border-radius: 999px; background: var(--w-card); font-size: 14px; font-weight: 700; }
 .btn-save { height: 40px; padding: 0 16px; border-radius: 999px; background: var(--coral); color: var(--on-accent); font-size: 14px; font-weight: 700; box-shadow: 0 6px 16px rgba(232,96,92,0.28); }
 .edit-body {
@@ -405,7 +392,7 @@ label.field { gap: 8px; }
 .switch.on { background: var(--sage); }
 .switch.on::after { transform: translateX(18px); }
 .hex { font-size: 12px; font-weight: 700; color: var(--w-fg3); text-transform: uppercase; letter-spacing: 0.04em; }
-.swatches { display: grid; grid-template-columns: repeat(9, minmax(0,1fr)); gap: 6px; justify-items: center; }
+.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(34px, 1fr)); gap: 8px 6px; justify-items: center; }
 .swatch { width: 32px; height: 32px; border-radius: 999px; transition: box-shadow 140ms ease; }
 .swatch.on { box-shadow: var(--ring); }
 .swatch-custom {
@@ -435,7 +422,6 @@ label.field { gap: 8px; }
   background-image: repeating-linear-gradient(to bottom, #FBF8F3 0, #FBF8F3 2px, #EADFD3 2px, #EADFD3 3px);
 }
 .cover-face { position: absolute; left: 0; right: 0; top: 0; bottom: 11%; background: var(--c); border-radius: 4cqw 6cqw 6cqw 4cqw; overflow: hidden; }
-.cover.flat .cover-face { bottom: 0; }
 .cover-img { position: absolute; inset: 0; background-size: cover; background-position: center; } /* an uploaded image is the whole front face */
 .cover-frame {
   position: absolute; inset: 7cqw; overflow: hidden;
@@ -501,8 +487,7 @@ input[type="search"]::-webkit-search-cancel-button { display: none; }
 /* ===== Audio tab ===== */
 .continue.listen { grid-template-columns: 110px minmax(0,1fr); }
 .btn-coral.lav { background: var(--lavender); box-shadow: 0 8px 20px rgba(140,123,196,0.30); }
-.grid.cds { grid-template-columns: repeat(2, minmax(0,1fr)); gap: 30px 16px; padding-top: 24px; }
-.grid.cds .audio-card { width: auto; }
+.grid.cds { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 30px 16px; padding-top: 24px; }
 .add-tile.square { aspect-ratio: 1/1; }
 
 /* ===== Tags ===== */
@@ -510,8 +495,8 @@ input[type="search"]::-webkit-search-cancel-button { display: none; }
 .chip.removable { gap: 8px; }
 .chip.removable svg { color: var(--coral); }
 .link-btn { min-height: 32px; padding: 0 4px; color: var(--coral); font-size: 13px; font-weight: 700; }
-.tag-form { display: flex; align-items: center; gap: 8px; }
-.tag-form .input { flex: 1; min-width: 0; }
+.tag-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.tag-form .input { flex: 1 1 160px; min-width: 0; }
 .tag-form button { flex: none; height: 44px; }
 
 /* ===== Library sheet ===== */
@@ -533,3 +518,28 @@ input[type="search"]::-webkit-search-cancel-button { display: none; }
 .hint { font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--w-fg2); text-wrap: pretty; }
 .hint.tip { display: flex; gap: 8px; align-items: flex-start; padding: 12px 14px; border-radius: 18px; background: var(--w-card); }
 .hint.tip svg { flex: none; margin-top: 1px; color: var(--lavender); }
+
+/* ===== Narrow screens =====
+   Phones with a large Display size give the page well under 360px of width.
+   The header drops the brand mark, and the continue cards put their buttons on
+   their own full-width row under the cover. */
+@media (max-width: 359px) {
+  .scroll { padding-left: 16px; padding-right: 16px; }
+  .bleed { margin: 0 -16px; padding-left: 16px; padding-right: 16px; }
+  .brand { display: none; }
+  .continue, .continue.listen {
+    grid-template-columns: 84px minmax(0,1fr); column-gap: 14px; row-gap: 6px;
+    align-items: start; padding: 16px; border-radius: 24px;
+  }
+  .continue-body { display: contents; }
+  .continue > .cover-tap { grid-column: 1; grid-row: 1 / 4; }
+  .continue-body > * { grid-column: 2; }
+  .continue-body > .btn-row { grid-column: 1 / -1; margin-top: 10px; }
+  .continue h2 { font-size: 17px; }
+  .lib-stats span { padding: 10px 4px; }
+  .edit-body { padding-left: 16px; padding-right: 16px; }
+  .edit-hd { padding-left: 16px; padding-right: 16px; }
+  .edit-hd .row { gap: 8px; }
+  .edit-hd h3 { font-size: 15px; line-height: 1.15; white-space: normal; text-wrap: balance; }
+  .btn-cancel, .btn-save { padding: 0 12px; }
+}

@@ -34,6 +34,7 @@ async function run(store, mode, fn) {
 export const db = {
   get: key => run('kv', 'readonly', s => s.get(key)),
   set: (key, value) => run('kv', 'readwrite', s => s.put(value, key)),
+  del: key => run('kv', 'readwrite', s => s.delete(key)),
   getFile: key => run('files', 'readonly', s => s.get(key)),
   putFile: (key, blob) => run('files', 'readwrite', s => s.put(blob, key)),
   deleteFiles: id => run('files', 'readwrite', s => s.delete(IDBKeyRange.bound(id + ':', id + ':￿'))),

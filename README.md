@@ -12,7 +12,7 @@ A warm, cosy ebook reader with an audiobook shelf of CD cases, built as an insta
 - **Library sheet** (archive button in the header): storage used, **Export backup** (a `.zip` with or without the audio) and **Restore from backup** (merges into the library and never deletes anything).
 
 Everything stays on the device:
-- Books and audiobook metadata are kept in IndexedDB, and so are the audio files themselves.
+- Books and audiobooks are listed in IndexedDB. Each book's text is a separate record, loaded only when the book is opened, and each audio track is stored as its own file.
 - Preferences and reading position are kept in localStorage.
 
 ## Files

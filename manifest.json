@@ -40,18 +40,8 @@
           "name": "files",
           "accept": [
             "application/epub+zip",
-            ".epub",
             "text/plain",
-            ".txt",
             "audio/*",
-            ".mp3",
-            ".m4a",
-            ".m4b",
-            ".aac",
-            ".ogg",
-            ".opus",
-            ".flac",
-            ".wav",
             "application/octet-stream"
           ]
         }
