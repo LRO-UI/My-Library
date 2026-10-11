@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
+<title>My Library</title>
+<meta name="description" content="A warm ebook reader and audiobook shelf.">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#FBF8F3">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Quicksand:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="styles.css">
+<script>
+  // Apply the saved theme before first paint so dark mode doesn't flash light.
+  try {
+    var p = JSON.parse(localStorage.getItem('my-library-prefs-v1'));
+    if (p && p.theme === 'dark') document.documentElement.dataset.theme = 'dark';
+  } catch (e) {}
+</script>
+</head>
+<body>
+<div id="app"></div>
+<script type="module" src="app.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js'); });
+  }
+</script>
+</body>
+</html>
