@@ -3,6 +3,7 @@ import { db } from './db.js';
 import { SEED_BOOKS, SEED_AUDIO, SEED_TAGS } from './seed.js';
 import { importBookFile, readAudioTracks, scaleImage, stripExt } from './importers.js';
 import { Player } from './player.js';
+import { exportBackup, readBackup, backupName, download } from './backup.js';
 
 // ===== Constants =====
 const PREFS_KEY = 'my-library-prefs-v1';  // { theme, fontSize, lastId, lastAudioId }
@@ -12,6 +13,12 @@ const EMPTY_CH = [{ title: 'Chapter 1', paras: ['This book has no content yet. T
 const THEME_COLOR = { light: '#FBF8F3', dark: '#1E1916' };
 const TAG_MAX = 24;
 const AUDIO_FORMATS = 'MP3, M4A, M4B, OGG, Opus, FLAC or WAV';
+const SHARE_KEY = 'share:pending'; // files handed over by the share target (see sw.js)
+const isBookFile = f => /\.(epub|txt)$/i.test(f.name) || f.type === 'application/epub+zip' || f.type === 'text/plain';
+const isAudioFile = f => f.type.startsWith('audio/') || /\.(mp3|m4a|m4b|aac|ogg|oga|opus|flac|wav)$/i.test(f.name);
+const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true });
+const guessTitle = files => (files.length === 1 ? stripExt(files[0].name) : stripExt(files[0].name).replace(/[\s\-_.]*\d+$/, ''));
+const fmtBytes = n => (n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n >= 1e6 ? Math.round(n / 1e6) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' KB');
 
 const newDraft = kind => kind === 'audio'
   ? { id: null, kind, title: 'New audiobook', author: 'Author', color: '#8C7BC4', tags: [], image: '', showText: true, tracks: [], len: 0, pos: 0 }
@@ -69,6 +76,9 @@ const I = {
   rewind: p => html`<${Svg} sw="2.2" ...${p}><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /></${Svg}>`,
   forward: p => html`<${Svg} sw="2.2" ...${p}><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></${Svg}>`,
   check: p => html`<${Svg} sw="2.6" ...${p}><path d="M20 6 9 17l-5-5" /></${Svg}>`,
+  archive: p => html`<${Svg} ...${p}><rect x="3" y="4" width="18" height="5" rx="1.5" /><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4" /></${Svg}>`,
+  download: p => html`<${Svg} sw="2.2" ...${p}><path d="M12 3v12M7 10l5 5 5-5M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4" /></${Svg}>`,
+  share: p => html`<${Svg} sw="2.2" ...${p}><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4" /></${Svg}>`,
   headphones: p => html`<${Svg} sw="2.4" ...${p}><path d="M3 18v-6a9 9 0 0 1 18 0v6" /><path d="M21 19a2 2 0 0 1-2 2h-1v-6h3zM3 19a2 2 0 0 0 2 2h1v-6H3z" /></${Svg}>`,
 };
 
@@ -140,6 +150,9 @@ function App() {
   const [toast, setToast] = useState('');
   const [tagInput, setTagInput] = useState(null); // null = closed, string = new tag name being typed
   const [manageTags, setManageTags] = useState(false);
+  const [libShown, setLibShown] = useState(false);
+  const [withAudio, setWithAudio] = useState(true);
+  const [usage, setUsage] = useState(null); // bytes used by the app, from navigator.storage
 
   const scrollRef = useRef(null);
   const readerRef = useRef(null);
@@ -168,6 +181,15 @@ function App() {
   }, []);
 
   useEffect(() => { if (ready) db.set('books', books).catch(e => console.warn(e)); }, [books]);
+  useEffect(() => {
+    if (!ready || !new URLSearchParams(location.search).has('shared')) return;
+    history.replaceState(null, '', location.pathname);
+    (async () => {
+      const files = await db.getFile(SHARE_KEY).catch(() => null);
+      await db.deleteFiles('share').catch(() => {});
+      if (files && files.length) importFiles(files);
+    })();
+  }, [ready]);
   useEffect(() => { if (ready) db.set('tags', tags).catch(e => console.warn(e)); }, [tags]);
 
   // Audio positions change every second while playing, so saves are batched.
@@ -211,6 +233,7 @@ function App() {
     audio: () => { setView('books'); setCat('All'); },
     reader: () => { setReaderId(null); setTypeShown(false); },
     type: () => setTypeShown(false),
+    lib: () => setLibShown(false),
     editor: () => {
       setSheetShown(false);
       clearTimeout(closeTimer.current);
@@ -241,6 +264,11 @@ function App() {
     pushLayer('reader');
   };
   const openType = () => { setTypeShown(true); pushLayer('type'); };
+  const openLib = () => {
+    setLibShown(true);
+    pushLayer('lib');
+    if (navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then(e => setUsage(e.usage)).catch(() => {});
+  };
 
   // --- Reader ---
   const vm = b => {
@@ -350,7 +378,7 @@ function App() {
   };
 
   const onAudioFiles = async e => {
-    const picked = [...(e.target.files || [])].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    const picked = [...(e.target.files || [])].sort(byName);
     e.target.value = '';
     if (!picked.length) return;
     setToast('Reading audio…');
@@ -362,9 +390,11 @@ function App() {
     if (files.length < picked.length) flash(`Skipped ${plural(picked.length - files.length, 'file', 'files')} that can't be played`);
     else setToast('');
     pendingAudio.current = files;
-    const guess = files.length === 1 ? stripExt(files[0].name) : stripExt(files[0].name).replace(/[\s\-_.]*\d+$/, '');
+    const guess = guessTitle(files);
+    const len = tracks.reduce((sum, t) => sum + t.dur, 0);
     setDraft(d => ({
-      ...d, tracks, pos: 0, len: tracks.reduce((s, t) => s + t.dur, 0),
+      // A CD restored from a backup without audio keeps its listening position.
+      ...d, tracks, len, pos: d.tracks && d.tracks.length ? 0 : Math.min(d.pos || 0, len),
       title: DEFAULT_TITLES.includes(d.title) && guess ? guess : d.title,
     }));
   };
@@ -409,6 +439,100 @@ function App() {
       setAudio(list => list.filter(a => a.id !== d.id));
     }
     closeEdit();
+  };
+
+  // --- Files shared from other apps ---
+  const importFiles = async files => {
+    const bookFiles = files.filter(isBookFile);
+    const audioFiles = files.filter(f => !isBookFile(f) && isAudioFile(f)).sort(byName);
+    const added = [];
+    let used = 0;
+    setToast('Adding to your library…');
+
+    const newBooks = [];
+    for (const [i, f] of bookFiles.entries()) {
+      try {
+        const r = await importBookFile(f);
+        newBooks.push({ id: 'b' + Date.now() + i, title: r.title, author: r.author || 'Unknown', color: SWATCHES[(books.length + i) % SWATCHES.length][1],
+          tags: [], image: r.image, showText: true, chapter: 0, chapters: r.chapters, source: f.name });
+      } catch (e) { console.warn(f.name, e); }
+    }
+    if (newBooks.length) { setBooks(list => [...list, ...newBooks]); added.push(plural(newBooks.length, 'book', 'books')); used += newBooks.length; }
+
+    if (audioFiles.length) {
+      const read = await readAudioTracks(audioFiles);
+      const ok = audioFiles.filter((f, i) => read[i].dur > 0);
+      if (ok.length) {
+        const id = 'a' + Date.now();
+        const tracks = read.filter(t => t.dur > 0);
+        await Promise.all(ok.map((f, i) => db.putFile(`${id}:${i}`, f)));
+        const rec = { id, title: guessTitle(ok), author: 'Unknown', color: SWATCHES[audio.length % SWATCHES.length][1], tags: [], image: '', showText: true,
+          tracks, len: tracks.reduce((sum, t) => sum + t.dur, 0), pos: 0 };
+        setAudio(list => [...list, rec]);
+        setPref({ lastAudioId: id });
+        added.push('1 audiobook');
+        used += ok.length;
+        if (!newBooks.length && view !== 'audio') goView('audio');
+      }
+    }
+    const skipped = files.length - used;
+    flash(added.length
+      ? `Added ${added.join(' and ')}${skipped > 0 ? ` · skipped ${plural(skipped, 'file', 'files')}` : ''}`
+      : `Nothing could be added. Share EPUB, TXT or ${AUDIO_FORMATS} files.`);
+  };
+
+  // --- Backup & restore ---
+  const onExport = async () => {
+    try {
+      let last = -1;
+      const blob = await exportBackup({
+        books, audio, tags, scroll: scrollPos.current, includeAudio: withAudio,
+        onProgress: p => { const n = Math.floor(p / 10) * 10; if (n !== last) { last = n; setToast(`Preparing backup… ${n}%`); } },
+      });
+      download(blob, backupName());
+      flash(`Backup saved to Downloads (${fmtBytes(blob.size)})`);
+    } catch (e) { flash('Backup failed: ' + e.message); }
+  };
+
+  const onRestore = async e => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    try {
+      setToast('Reading backup…');
+      const { data, getAudio } = await readBackup(f);
+      setToast('');
+      if (!confirm(`Restore ${plural(data.books.length, 'book', 'books')} and ${plural(data.audio.length, 'audiobook', 'audiobooks')}? Items you already have are updated; nothing else is removed.`)) return;
+      setToast('Restoring…');
+      const restoredAudio = [];
+      let missing = 0;
+      for (const a of data.audio.map(withTags)) {
+        let rec = a;
+        if (a.tracks && a.tracks.length) {
+          const blobs = await Promise.all(a.tracks.map((_, i) => getAudio(a.id, i)));
+          if (blobs.every(Boolean)) {
+            if (player.item && player.item.id === a.id) player.stop();
+            await db.deleteFiles(a.id);
+            await Promise.all(blobs.map((b, i) => db.putFile(`${a.id}:${i}`, b)));
+          } else if (!(await db.getFile(`${a.id}:0`))) {
+            rec = { ...a, tracks: [] }; // backup made without audio: keep the CD, re-add audio later
+            missing++;
+          }
+        }
+        restoredAudio.push(rec);
+      }
+      const merge = (list, incoming) => {
+        const byId = Object.fromEntries(incoming.map(x => [x.id, x]));
+        const have = new Set(list.map(x => x.id));
+        return [...list.map(x => byId[x.id] || x), ...incoming.filter(x => !have.has(x.id))];
+      };
+      setBooks(list => merge(list, data.books.map(withTags)));
+      setAudio(list => merge(list, restoredAudio));
+      setTags(list => [...list, ...data.tags.filter(t => !list.some(x => x.name.toLowerCase() === t.name.toLowerCase()))]);
+      scrollPos.current = { ...scrollPos.current, ...data.scroll };
+      writeJSON(SCROLL_KEY, scrollPos.current);
+      flash(`Restored your library${missing ? ` · ${plural(missing, 'CD needs', 'CDs need')} audio re-added` : ''}`);
+    } catch (err) { flash(err.message); }
   };
 
   if (!ready) return html`<div class="shell"></div>`;
@@ -565,9 +689,12 @@ function App() {
           <div class="brand">${isBooks ? html`<${I.book} size="19" />` : html`<${I.headphones} size="19" sw="2" />`}</div>
           <h1>${isBooks ? 'Reading' : 'Listening'}</h1>
         </div>
-        <button class="theme-btn" title="Toggle theme" onClick=${() => setPref({ theme: isDark ? 'light' : 'dark' })}>
-          ${isDark ? html`<${I.sun} size="19" />` : html`<${I.moon} size="19" />`}
-        </button>
+        <div class="hdr-right">
+          <button class="btn-round" title="Library & backup" onClick=${openLib}><${I.archive} size="19" /></button>
+          <button class="theme-btn" title="Toggle theme" onClick=${() => setPref({ theme: isDark ? 'light' : 'dark' })}>
+            ${isDark ? html`<${I.sun} size="19" />` : html`<${I.moon} size="19" />`}
+          </button>
+        </div>
       </header>
 
       <label class="search">
@@ -595,7 +722,37 @@ function App() {
           <span class="ico"><${I.headphones} size="20" sw="2" /></span><span>Audio</span>
         </button>
       </div>
-    </nav>`;
+    </nav>
+    ${renderLibSheet()}`;
+
+  const renderLibSheet = () => html`
+    <div class=${'overlay' + (libShown ? ' on' : '')} onClick=${() => popLayer('lib')}></div>
+    <div class=${'type-sheet' + (libShown ? ' on' : '')} inert=${!libShown}>
+      <div class="grabber"></div>
+      <div class="sheet-hd">
+        <h3>Library</h3>
+        <button class="btn-round" title="Close" onClick=${() => popLayer('lib')}><${I.x} size="16" sw="2.4" /></button>
+      </div>
+      <div class="lib-stats">
+        <span><b>${books.length}</b> ${books.length === 1 ? 'book' : 'books'}</span>
+        <span><b>${audio.length}</b> ${audio.length === 1 ? 'audiobook' : 'audiobooks'}</span>
+        <span><b>${usage == null ? '…' : fmtBytes(usage)}</b> used</span>
+      </div>
+      <div class="field">
+        <span class="label">Backup</span>
+        <button class="switch-row" onClick=${() => setWithAudio(v => !v)}>
+          Include audio files
+          <span class=${'switch' + (withAudio ? ' on' : '')}></span>
+        </button>
+        <button class="btn-coral" style="height:48px;" onClick=${onExport}><${I.download} size="17" /> Export backup</button>
+        <label class="btn-soft">
+          <${I.upload} size="17" /> Restore from backup
+          <input type="file" accept=".zip,application/zip" onChange=${onRestore} />
+        </label>
+        <p class="hint">Backups go to your Downloads folder. Copy them to your computer to keep them safe. Restoring adds to your library and never deletes anything.</p>
+      </div>
+      <p class="hint tip"><${I.share} size="15" /> To add files from anywhere, select EPUB, TXT or audio files in your Files app, tap Share, then My Library.</p>
+    </div>`;
 
   const renderReader = () => {
     const c = rb.chs[rb.ch];

@@ -104,7 +104,7 @@ function chunk(paras) {
 // ---------- EPUB ----------
 
 let jszipPromise = null;
-function loadJSZip() {
+export function loadJSZip() {
   if (window.JSZip) return Promise.resolve(window.JSZip);
   if (!jszipPromise) {
     jszipPromise = new Promise((resolve, reject) => {
