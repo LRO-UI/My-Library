@@ -3,9 +3,10 @@
 import { db } from './db.js';
 
 export class Player {
-  constructor({ onTime, onState }) {
+  constructor({ onTime, onState, fileUrl }) {
     this.onTime = onTime;   // (id, pos)
     this.onState = onState; // (id | null) — the id that is playing now
+    this.fileUrl = fileUrl; // (key) → streaming URL for a cloud track
     this.el = new Audio();
     this.el.preload = 'auto';
     this.item = null;
@@ -51,16 +52,19 @@ export class Player {
   }
 
   async load(i) {
+    // Cloud tracks stream from the server unless a copy is stored on the device.
+    const track = this.item.tracks[i];
     const blob = await db.getFile(`${this.item.id}:${i}`);
-    if (!blob) throw new Error('The audio file for this CD is missing. Re-add it in the editor.');
+    if (!blob && !track.key) throw new Error('The audio file for this CD is missing. Re-add it in the editor.');
+    const src = blob ? URL.createObjectURL(blob) : this.fileUrl(track.key);
     this.switching = true;
     if (this.url) URL.revokeObjectURL(this.url);
-    this.url = URL.createObjectURL(blob);
+    this.url = blob ? src : '';
     this.idx = i;
-    this.el.src = this.url;
+    this.el.src = src;
     await new Promise((resolve, reject) => {
       this.el.addEventListener('loadedmetadata', resolve, { once: true });
-      this.el.addEventListener('error', () => reject(new Error('This audio format is not supported.')), { once: true });
+      this.el.addEventListener('error', () => reject(new Error(blob ? 'This audio format is not supported.' : 'Could not stream this audiobook. Check your connection and cloud settings.')), { once: true });
     });
     this.switching = false;
   }

@@ -1,4 +1,6 @@
-const CACHE_NAME = 'my-library-v10';
+const CACHE_NAME = 'my-library-v11';
+// Other hosts the app's own code is loaded from. Anything else (the cloud server) is left alone.
+const CDN_HOSTS = ['unpkg.com', 'cdnjs.cloudflare.com'];
 const FILES_TO_CACHE = [
   './',
   './index.html',
@@ -71,9 +73,13 @@ self.addEventListener('fetch', (event) => {
 
 // Network-first: always try to fetch the latest version first.
 // Only fall back to the cached copy if the network request fails (offline).
-// Audio is played from blob: URLs, so it never passes through here.
+// Local audio is played from blob: URLs, so it never passes through here. Cloud
+// requests (catalog, books, streamed audio) go straight to the network: they are
+// large, use Range requests and carry the access token.
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET' || !event.request.url.startsWith('http')) return;
+  const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin && !CDN_HOSTS.includes(url.hostname)) return;
   event.respondWith(
     fetch(event.request)
       .then((response) => {

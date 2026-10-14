@@ -1,7 +1,7 @@
 import { html, render, Component, useState, useEffect, useRef, useMemo } from 'https://unpkg.com/htm@3.1.1/preact/standalone.module.js';
 import { db } from './db.js';
 import { SEED_BOOKS, SEED_AUDIO, SEED_TAGS, RETIRED_SEEDS } from './seed.js';
-import { importBookFile, readAudioTracks, scaleImage, stripExt } from './importers.js';
+import { importBookFile, readAudioTracks, readAudioDurations, scaleImage, stripExt } from './importers.js';
 import { Player } from './player.js';
 import { exportBackup, readBackup, backupName, download } from './backup.js';
 
@@ -21,7 +21,17 @@ const isBookFile = f => /\.(epub|txt)$/i.test(f.name) || f.type === 'application
 const isAudioFile = f => f.type.startsWith('audio/') || /\.(mp3|m4a|m4b|aac|ogg|oga|opus|flac|wav)$/i.test(f.name);
 const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true });
 const guessTitle = files => (files.length === 1 ? stripExt(files[0].name) : stripExt(files[0].name).replace(/[\s\-_.]*\d+$/, ''));
-const fmtBytes = n => (n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n >= 1e6 ? Math.round(n / 1e6) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' KB');
+// Cloud library (see cloudflare/worker.js). Items synced from it carry `cloud`: their key in the bucket.
+const cloudReady = p => !!(p.cloudUrl && p.cloudToken);
+const cloudApi = (p, path) => p.cloudUrl.trim().replace(/\/+$/, '') + path + '?t=' + encodeURIComponent(p.cloudToken.trim());
+const cloudFile = (p, key) => cloudApi(p, '/file/' + key.split('/').map(encodeURIComponent).join('/'));
+async function cloudFetch(url) {
+  const res = await fetch(url);
+  if (res.status === 401) throw new Error('The cloud token is wrong. Check it in Library.');
+  if (!res.ok) throw new Error(`The cloud server answered ${res.status}.`);
+  return res;
+}
+const fmtBytes = n =>(n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n >= 1e6 ? Math.round(n / 1e6) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' KB');
 
 const newDraft = kind => kind === 'audio'
   ? { id: null, kind, title: 'New audiobook', author: 'Author', color: '#8C7BC4', tags: [], image: '', showText: true, tracks: [], len: 0, pos: 0 }
@@ -83,7 +93,8 @@ const I = {
   archive: p => html`<${Svg} ...${p}><rect x="3" y="4" width="18" height="5" rx="1.5" /><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4" /></${Svg}>`,
   download: p => html`<${Svg} sw="2.2" ...${p}><path d="M12 3v12M7 10l5 5 5-5M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4" /></${Svg}>`,
   share: p => html`<${Svg} sw="2.2" ...${p}><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4" /></${Svg}>`,
-  headphones: p => html`<${Svg} sw="2.4" ...${p}><path d="M3 18v-6a9 9 0 0 1 18 0v6" /><path d="M21 19a2 2 0 0 1-2 2h-1v-6h3zM3 19a2 2 0 0 0 2 2h1v-6H3z" /></${Svg}>`,
+  cloud: p => html`<${Svg} sw="2.2" ...${p}><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" /></${Svg}>`,
+  headphones: p =>html`<${Svg} sw="2.4" ...${p}><path d="M3 18v-6a9 9 0 0 1 18 0v6" /><path d="M21 19a2 2 0 0 1-2 2h-1v-6h3zM3 19a2 2 0 0 0 2 2h1v-6H3z" /></${Svg}>`,
 };
 
 // ===== Covers =====
@@ -178,6 +189,11 @@ function App() {
   const textCache = useRef(new Map()); // recently opened books' chapters
   const audioRef = useRef(audio);
   audioRef.current = audio;
+  const booksRef = useRef(books);
+  booksRef.current = books;
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
+  const syncing = useRef(false);
 
   const isDark = prefs.theme === 'dark';
   const setPref = patch => setPrefs(p => ({ ...p, ...patch }));
@@ -254,6 +270,7 @@ function App() {
       return list.map(x => (x.id === id ? { ...x, pos } : x));
     }),
     onState: id => setPlayingId(id),
+    fileUrl: key => cloudFile(prefsRef.current, key),
   }), []);
 
   // --- Android back button: each overlay pushes a history entry ---
@@ -483,7 +500,8 @@ function App() {
 
   const deleteItem = async () => {
     const d = draft;
-    if (!d || !d.id || !confirm(`Delete “${d.title}” from your library?`)) return;
+    if (!d || !d.id || !confirm(`Delete “${d.title}” from your library?${d.cloud ? ' It stays in your cloud bucket but won’t be synced again.' : ''}`)) return;
+    if (d.cloud) setPref({ cloudHidden: [...(prefs.cloudHidden || []), d.cloud] });
     if (d.kind === 'book') {
       const rest = books.filter(b => b.id !== d.id);
       setBooks(rest);
@@ -539,6 +557,64 @@ function App() {
       : `Nothing could be added. Share EPUB, TXT or ${AUDIO_FORMATS} files.`);
   };
 
+  // --- Cloud library ---
+  // Adds whatever is in the bucket and not yet on the shelf. Books are downloaded and
+  // imported (so they work offline); audiobooks only have their track lengths read and
+  // are streamed when played. Items removed from the shelf stay in `cloudHidden`.
+  const syncCloud = async quiet => {
+    const p = prefsRef.current;
+    if (!cloudReady(p) || syncing.current) return;
+    syncing.current = true;
+    const say = msg => { if (!quiet) setToast(msg); };
+    try {
+      say('Checking your cloud library…');
+      const cat = await (await cloudFetch(cloudApi(p, '/catalog'))).json();
+      const hidden = new Set(p.cloudHidden || []);
+      const haveB = new Set(booksRef.current.map(b => b.cloud).filter(Boolean));
+      const haveA = new Set(audioRef.current.map(a => a.cloud).filter(Boolean));
+      const newBooks = cat.books.filter(c => !haveB.has(c.key) && !hidden.has(c.key));
+      const newAudio = cat.audio.filter(c => !haveA.has(c.id) && !hidden.has(c.id));
+      const cover = async key => { try { return key ? await scaleImage(await (await cloudFetch(cloudFile(p, key))).blob()) : ''; } catch (e) { return ''; } };
+      let nb = 0, na = 0, failed = 0;
+
+      for (const [i, c] of newBooks.entries()) {
+        setToast(`Downloading books… ${i + 1} of ${newBooks.length}`);
+        try {
+          const blob = await (await cloudFetch(cloudFile(p, c.key))).blob();
+          const r = await importBookFile(new File([blob], c.name));
+          const id = 'b' + Date.now() + i;
+          await saveText(id, r.chapters);
+          const rec = { id, cloud: c.key, title: r.title || c.title, author: r.author || 'Unknown', color: SWATCHES[(booksRef.current.length + i) % SWATCHES.length][1],
+            tags: [], image: r.image || (await cover(c.cover)), showText: true, chapter: 0, chCount: r.chapters.length, source: c.name };
+          setBooks(list => [...list, rec]);
+          nb++;
+        } catch (e) { console.warn(c.key, e); failed++; }
+      }
+
+      for (const [i, c] of newAudio.entries()) {
+        setToast(`Adding audiobooks… ${i + 1} of ${newAudio.length}`);
+        const durs = await readAudioDurations(c.tracks.map(t => cloudFile(p, t.key)));
+        const tracks = c.tracks.map((t, j) => ({ name: t.name, key: t.key, dur: durs[j] })).filter(t => t.dur > 0);
+        if (!tracks.length) { console.warn(c.id, 'no playable tracks'); failed++; continue; }
+        const rec = { id: 'a' + Date.now() + i, cloud: c.id, title: c.title, author: 'Unknown', color: SWATCHES[(audioRef.current.length + i) % SWATCHES.length][1],
+          tags: [], image: await cover(c.cover), showText: true, tracks, len: tracks.reduce((sum, t) => sum + t.dur, 0), pos: 0 };
+        setAudio(list => [...list, rec]);
+        na++;
+      }
+
+      const added = [nb && plural(nb, 'book', 'books'), na && plural(na, 'audiobook', 'audiobooks')].filter(Boolean);
+      if (added.length || failed) flash(`${added.length ? 'Added ' + added.join(' and ') + ' from the cloud' : 'Nothing new added'}${failed ? ` · ${plural(failed, 'item', 'items')} could not be read` : ''}`);
+      else if (!quiet) flash('Your cloud library is up to date');
+      else setToast('');
+    } catch (e) {
+      console.warn('Cloud sync failed', e);
+      if (quiet) setToast(''); else flash(e.message === 'Failed to fetch' ? 'Could not reach the cloud server. Check the address.' : e.message);
+    } finally {
+      syncing.current = false;
+    }
+  };
+  useEffect(() => { if (ready) syncCloud(true); }, [ready]);
+
   // --- Backup & restore ---
   const onExport = async () => {
     try {
@@ -567,7 +643,8 @@ function App() {
       let missing = 0;
       for (const a of data.audio.map(withTags)) {
         let rec = a;
-        if (a.tracks && a.tracks.length) {
+        // Cloud tracks (with a `key`) stream from the server and have no blobs to restore.
+        if (a.tracks && a.tracks.length && a.tracks.some(t => !t.key)) {
           const blobs = await Promise.all(a.tracks.map((_, i) => getAudio(a.id, i)));
           if (blobs.every(Boolean)) {
             if (player.item && player.item.id === a.id) player.stop();
@@ -799,6 +876,19 @@ function App() {
         <span><b>${books.length}</b> ${books.length === 1 ? 'book' : 'books'}</span>
         <span><b>${audio.length}</b> ${audio.length === 1 ? 'audiobook' : 'audiobooks'}</span>
         <span><b>${usage == null ? '…' : fmtBytes(usage)}</b> used</span>
+      </div>
+      <div class="field">
+        <span class="label">Cloud library</span>
+        <input class="input" type="url" placeholder="https://my-library.you.workers.dev" value=${prefs.cloudUrl || ''}
+          onInput=${e => setPref({ cloudUrl: e.target.value })} autocomplete="off" spellcheck="false" />
+        <input class="input" type="password" placeholder="Access token" value=${prefs.cloudToken || ''}
+          onInput=${e => setPref({ cloudToken: e.target.value })} autocomplete="off" />
+        <button class="btn-soft" disabled=${!cloudReady(prefs)} onClick=${() => syncCloud(false)}><${I.cloud} size="17" /> Sync now</button>
+        ${(prefs.cloudHidden || []).length > 0 && html`
+          <button class="link-btn" style="align-self:flex-start;" onClick=${() => { setPref({ cloudHidden: [] }); setTimeout(() => syncCloud(false)); }}>
+            Bring back ${plural(prefs.cloudHidden.length, 'deleted cloud item', 'deleted cloud items')}
+          </button>`}
+        <p class="hint">New books and audiobooks in your bucket are added each time the app opens. Books are downloaded so they work offline; audiobooks stream.</p>
       </div>
       <div class="field">
         <span class="label">Backup</span>

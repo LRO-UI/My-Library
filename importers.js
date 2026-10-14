@@ -1,6 +1,7 @@
 // Turns user files into library content.
 //   importBookFile(file)     → { title, author, image, chapters: [{ title, paras }] }
 //   readAudioTracks(files)   → [{ name, dur }]   (seconds)
+//   readAudioDurations(urls) → [dur]             (seconds, for cloud tracks)
 //   scaleImage(fileOrBlob)   → JPEG data URL, long edge ≤ 700px
 
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
@@ -43,7 +44,25 @@ export function readAudioTracks(files) {
   })));
 }
 
-export const stripExt = name => name.replace(/\.[^.]+$/, '').replace(/[_]+/g, ' ').trim();
+// Durations of remote tracks (seconds, 0 if unreadable). Only the metadata is fetched.
+export async function readAudioDurations(urls) {
+  const durationOf = url => new Promise(resolve => {
+    const a = new Audio();
+    const timer = setTimeout(() => done(0), 30000);
+    const done = dur => { clearTimeout(timer); a.removeAttribute('src'); a.load(); resolve(dur); };
+    a.preload = 'metadata';
+    a.onloadedmetadata = () => done(isFinite(a.duration) ? a.duration : 0);
+    a.onerror = () => done(0);
+    a.src = url;
+  });
+  const out = new Array(urls.length);
+  let next = 0;
+  const worker = async () => { while (next < urls.length) { const i = next++; out[i] = await durationOf(urls[i]); } };
+  await Promise.all(Array.from({ length: Math.min(4, urls.length) }, worker));
+  return out;
+}
+
+export const stripExt =name => name.replace(/\.[^.]+$/, '').replace(/[_]+/g, ' ').trim();
 
 // ---------- TXT ----------
 

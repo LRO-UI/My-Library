@@ -11,7 +11,9 @@ A warm, cosy ebook reader with an audiobook shelf of CD cases, built as an insta
 - **Share to My Library**: once installed, the app appears in Android's share menu. Shared EPUB/TXT files become books; shared audio files become one audiobook, with the tracks in name order.
 - **Library sheet** (archive button in the header): storage used, **Export backup** (a `.zip` with or without the audio) and **Restore from backup** (merges into the library and never deletes anything).
 
-Everything stays on the device:
+- **Cloud library** (optional): books and audiobooks stored in a Cloudflare R2 bucket appear on the shelves automatically. Books are downloaded on sync; audiobooks stream. See [`cloudflare/SETUP.md`](cloudflare/SETUP.md).
+
+Everything else stays on the device:
 - Books and audiobooks are listed in IndexedDB. Each book's text is a separate record, loaded only when the book is opened, and each audio track is stored as its own file.
 - Preferences and reading position are kept in localStorage.
 
@@ -27,6 +29,8 @@ Everything stays on the device:
 | `db.js` | IndexedDB wrapper |
 | `seed.js` | Sample books and CDs shown on first launch |
 | `sw.js` | Network-first service worker for offline use + share-target handler |
+| `cloudflare/worker.js` | Cloudflare Worker serving the R2 cloud library (deployed separately) |
+| `cloudflare/SETUP.md` | How to set up the bucket, Worker and uploads |
 
 Runtime dependencies come from CDNs and the service worker caches them:
 - `htm@3.1.1/preact/standalone`

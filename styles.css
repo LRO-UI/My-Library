@@ -515,6 +515,7 @@ input[type="search"]::-webkit-search-cancel-button { display: none; }
   display: flex; align-items: center; justify-content: center; gap: 7px;
 }
 .btn-soft input { display: none; }
+.btn-soft:disabled { opacity: 0.5; cursor: default; }
 .hint { font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--w-fg2); text-wrap: pretty; }
 .hint.tip { display: flex; gap: 8px; align-items: flex-start; padding: 12px 14px; border-radius: 18px; background: var(--w-card); }
 .hint.tip svg { flex: none; margin-top: 1px; color: var(--lavender); }
