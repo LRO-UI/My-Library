@@ -260,7 +260,7 @@ function App() {
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = 0; }, [view]);
   useEffect(() => { if (tagInput === '' && tagInputRef.current) tagInputRef.current.focus(); }, [tagInput === '']);
 
-  const flash = msg => { setToast(msg); setTimeout(() => setToast(t => (t === msg ? '' : t)), 2600); };
+  const flash = (msg, ms = 2600) => { setToast(msg); setTimeout(() => setToast(t => (t === msg ? '' : t)), ms); };
 
   // --- Player ---
   const player = useMemo(() => new Player({
@@ -575,7 +575,8 @@ function App() {
       const newBooks = cat.books.filter(c => !haveB.has(c.key) && !hidden.has(c.key));
       const newAudio = cat.audio.filter(c => !haveA.has(c.id) && !hidden.has(c.id));
       const cover = async key => { try { return key ? await scaleImage(await (await cloudFetch(cloudFile(p, key))).blob()) : ''; } catch (e) { return ''; } };
-      let nb = 0, na = 0, failed = 0;
+      let nb = 0, na = 0;
+      const failed = []; // names of items that could not be added
 
       for (const [i, c] of newBooks.entries()) {
         setToast(`Downloading books… ${i + 1} of ${newBooks.length}`);
@@ -588,14 +589,14 @@ function App() {
             tags: [], image: r.image || (await cover(c.cover)), showText: true, chapter: 0, chCount: r.chapters.length, source: c.name };
           setBooks(list => [...list, rec]);
           nb++;
-        } catch (e) { console.warn(c.key, e); failed++; }
+        } catch (e) { console.warn(c.key, e); failed.push(c.title); }
       }
 
       for (const [i, c] of newAudio.entries()) {
         setToast(`Adding audiobooks… ${i + 1} of ${newAudio.length}`);
         const durs = await readAudioDurations(c.tracks.map(t => cloudFile(p, t.key)));
         const tracks = c.tracks.map((t, j) => ({ name: t.name, key: t.key, dur: durs[j] })).filter(t => t.dur > 0);
-        if (!tracks.length) { console.warn(c.id, 'no playable tracks'); failed++; continue; }
+        if (!tracks.length) { console.warn(c.id, 'no playable tracks'); failed.push(c.title); continue; }
         const rec = { id: 'a' + Date.now() + i, cloud: c.id, title: c.title, author: 'Unknown', color: SWATCHES[(audioRef.current.length + i) % SWATCHES.length][1],
           tags: [], image: await cover(c.cover), showText: true, tracks, len: tracks.reduce((sum, t) => sum + t.dur, 0), pos: 0 };
         setAudio(list => [...list, rec]);
@@ -603,7 +604,8 @@ function App() {
       }
 
       const added = [nb && plural(nb, 'book', 'books'), na && plural(na, 'audiobook', 'audiobooks')].filter(Boolean);
-      if (added.length || failed) flash(`${added.length ? 'Added ' + added.join(' and ') + ' from the cloud' : 'Nothing new added'}${failed ? ` · ${plural(failed, 'item', 'items')} could not be read` : ''}`);
+      if (failed.length) flash(`${added.length ? 'Added ' + added.join(' and ') + ' · ' : ''}Could not add: ${failed.join(', ')}. Tap Sync now to retry.`, 8000);
+      else if (added.length) flash(`Added ${added.join(' and ')} from the cloud`);
       else if (!quiet) flash('Your cloud library is up to date');
       else setToast('');
     } catch (e) {

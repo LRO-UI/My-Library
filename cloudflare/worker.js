@@ -113,7 +113,11 @@ async function file(req, bucket, key) {
 
   const headers = new Headers(CORS);
   obj.writeHttpMetadata(headers);
-  if (!headers.get('Content-Type')) headers.set('Content-Type', TYPES[(key.split('.').pop() || '').toLowerCase()] || 'application/octet-stream');
+  // Upload tools label some formats oddly (e.g. .m4b as audio/x-m4b or octet-stream),
+  // which phones can refuse to play, so known extensions always get the standard type.
+  const type = TYPES[(key.split('.').pop() || '').toLowerCase()];
+  if (type) headers.set('Content-Type', type);
+  else if (!headers.get('Content-Type')) headers.set('Content-Type', 'application/octet-stream');
   headers.set('ETag', obj.httpEtag);
   headers.set('Accept-Ranges', 'bytes');
   headers.set('Cache-Control', 'private, max-age=86400');

@@ -44,11 +44,12 @@ export function readAudioTracks(files) {
   })));
 }
 
-// Durations of remote tracks (seconds, 0 if unreadable). Only the metadata is fetched.
+// Durations of remote tracks (seconds, 0 if unreadable). Only the metadata is fetched,
+// but M4B files with many chapters can carry several MB of it, so allow time on mobile data.
 export async function readAudioDurations(urls) {
   const durationOf = url => new Promise(resolve => {
     const a = new Audio();
-    const timer = setTimeout(() => done(0), 30000);
+    const timer = setTimeout(() => done(0), 120000);
     const done = dur => { clearTimeout(timer); a.removeAttribute('src'); a.load(); resolve(dur); };
     a.preload = 'metadata';
     a.onloadedmetadata = () => done(isFinite(a.duration) ? a.duration : 0);
