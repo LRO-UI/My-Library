@@ -44,10 +44,20 @@ export function readAudioTracks(files) {
   })));
 }
 
-// Durations of remote tracks (seconds, 0 if unreadable). Only the metadata is fetched,
-// but M4B files with many chapters can carry several MB of it, so allow time on mobile data.
+// Durations of remote tracks (seconds, 0 if unreadable). MP3 and MP4/M4B lengths are read
+// from the file header with a few small Range requests; other formats (and any header that
+// can't be parsed) fall back to loading the track's metadata in an <audio> element, which
+// phones can be slow or unwilling to do in the background.
 export async function readAudioDurations(urls) {
-  const durationOf = url => new Promise(resolve => {
+  const durationOf = async url => {
+    const ext = (new URL(url).pathname.split('.').pop() || '').toLowerCase();
+    try {
+      const dur = ext === 'mp3' ? await mp3Duration(url) : ['m4a', 'm4b', 'mp4'].includes(ext) ? await mp4Duration(url) : 0;
+      if (dur > 0) return dur;
+    } catch (e) { console.warn('Header read failed', url, e); }
+    return elementDuration(url);
+  };
+  const elementDuration = url => new Promise(resolve => {
     const a = new Audio();
     const timer = setTimeout(() => done(0), 120000);
     const done = dur => { clearTimeout(timer); a.removeAttribute('src'); a.load(); resolve(dur); };
@@ -63,7 +73,78 @@ export async function readAudioDurations(urls) {
   return out;
 }
 
-export const stripExt =name => name.replace(/\.[^.]+$/, '').replace(/[_]+/g, ' ').trim();
+// Bytes start..end of a remote file, plus the file's total size.
+async function rangeBytes(url, start, end) {
+  const ctrl = new AbortController();
+  const res = await fetch(url, { headers: { Range: `bytes=${start}-${end}` }, signal: ctrl.signal });
+  // A server that ignores Range would send the whole file; don't download it.
+  if (res.status !== 206) { ctrl.abort(); throw new Error('Range not supported (' + res.status + ')'); }
+  const total = Number((res.headers.get('Content-Range') || '').split('/')[1]) || 0;
+  return { view: new DataView(await res.arrayBuffer()), total };
+}
+const fourcc = (v, i) => String.fromCharCode(v.getUint8(i), v.getUint8(i + 1), v.getUint8(i + 2), v.getUint8(i + 3));
+
+// MP4/M4A/M4B: walk the top-level boxes to 'moov', then read 'mvhd' (timescale + duration).
+async function mp4Duration(url) {
+  let pos = 0, total = Infinity;
+  for (let n = 0; n < 64 && pos < total; n++) {
+    const { view, total: t } = await rangeBytes(url, pos, pos + 15);
+    if (t) total = t;
+    if (view.byteLength < 8) return 0;
+    let size = view.getUint32(0), hdr = 8;
+    const type = fourcc(view, 4);
+    if (size === 1 && view.byteLength >= 16) { size = view.getUint32(8) * 2 ** 32 + view.getUint32(12); hdr = 16; }
+    else if (size === 0) size = total - pos;
+    if (type === 'moov') {
+      const { view: m } = await rangeBytes(url, pos + hdr, pos + hdr + 255);
+      for (let i = 4; i + 36 <= m.byteLength; i++) {
+        if (fourcc(m, i) !== 'mvhd') continue;
+        const v1 = m.getUint8(i + 4) === 1;
+        const scale = m.getUint32(i + (v1 ? 24 : 16));
+        const dur = v1 ? m.getUint32(i + 28) * 2 ** 32 + m.getUint32(i + 32) : m.getUint32(i + 20);
+        return scale ? dur / scale : 0;
+      }
+      return 0;
+    }
+    if (size < 8) return 0;
+    pos += size;
+  }
+  return 0;
+}
+
+// MP3: skip the ID3 tag, find the first frame, then use its Xing/Info or VBRI frame count;
+// without one the file is constant bitrate and the length follows from its size.
+async function mp3Duration(url) {
+  const { view: id3, total } = await rangeBytes(url, 0, 9);
+  let start = 0;
+  if (id3.byteLength >= 10 && fourcc(id3, 0).startsWith('ID3')) {
+    const s = i => id3.getUint8(i) & 0x7f;
+    start = 10 + ((s(6) << 21) | (s(7) << 14) | (s(8) << 7) | s(9)) + (id3.getUint8(5) & 0x10 ? 10 : 0);
+  }
+  const { view: v } = await rangeBytes(url, start, start + 16383);
+  const len = v.byteLength;
+  for (let i = 0; i + 4 <= len; i++) {
+    const b2 = v.getUint8(i + 1);
+    if (v.getUint8(i) !== 0xff || (b2 & 0xe0) !== 0xe0) continue;
+    const ver = (b2 >> 3) & 3;      // 3 MPEG-1, 2 MPEG-2, 0 MPEG-2.5
+    const layer = (b2 >> 1) & 3;    // 1 = Layer III
+    const b3 = v.getUint8(i + 2), b4 = v.getUint8(i + 3);
+    const brIdx = b3 >> 4, srIdx = (b3 >> 2) & 3;
+    if (ver === 1 || layer !== 1 || brIdx === 0 || brIdx === 15 || srIdx === 3) continue;
+    const mpeg1 = ver === 3;
+    const rate = [44100, 48000, 32000][srIdx] / (mpeg1 ? 1 : ver === 2 ? 2 : 4);
+    const kbps = (mpeg1 ? [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320] : [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160])[brIdx];
+    const perFrame = mpeg1 ? 1152 : 576;
+    const mono = b4 >> 6 === 3;
+    const x = i + 4 + (mpeg1 ? (mono ? 17 : 32) : (mono ? 9 : 17));
+    if (x + 12 <= len && ['Xing', 'Info'].includes(fourcc(v, x)) && v.getUint32(x + 4) & 1) return (v.getUint32(x + 8) * perFrame) / rate;
+    if (i + 36 + 18 <= len && fourcc(v, i + 36) === 'VBRI') return (v.getUint32(i + 36 + 14) * perFrame) / rate;
+    return total ? ((total - start - i) * 8) / (kbps * 1000) : 0;
+  }
+  return 0;
+}
+
+export const stripExt = name =>name.replace(/\.[^.]+$/, '').replace(/[_]+/g, ' ').trim();
 
 // ---------- TXT ----------
 

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'my-library-v12';
+const CACHE_NAME = 'my-library-v13';
 // Other hosts the app's own code is loaded from. Anything else (the cloud server) is left alone.
 const CDN_HOSTS = ['unpkg.com', 'cdnjs.cloudflare.com'];
 const FILES_TO_CACHE = [
