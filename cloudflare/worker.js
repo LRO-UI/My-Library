@@ -122,8 +122,12 @@ async function file(req, bucket, key) {
   headers.set('Accept-Ranges', 'bytes');
   headers.set('Cache-Control', 'private, max-age=86400');
 
-  // onlyIf matched (e.g. If-None-Match): R2 returns the object without a body.
-  if (!('body' in obj)) return new Response(null, { status: 304, headers });
+  // A precondition failed: R2 returns the object without a body. If-None-Match /
+  // If-Modified-Since mean "you already have it" (304); If-Match etc. mean "it changed" (412).
+  if (!('body' in obj)) {
+    const notModified = req.headers.has('If-None-Match') || req.headers.has('If-Modified-Since');
+    return new Response(null, { status: notModified ? 304 : 412, headers });
+  }
 
   const size = obj.size;
   let start = 0, end = size - 1;

@@ -76,7 +76,9 @@ export async function readAudioDurations(urls) {
 // Bytes start..end of a remote file, plus the file's total size.
 async function rangeBytes(url, start, end) {
   const ctrl = new AbortController();
-  const res = await fetch(url, { headers: { Range: `bytes=${start}-${end}` }, signal: ctrl.signal });
+  // no-store: tiny cached fragments of the file would otherwise be stitched into the
+  // <audio> element's later stream of the same URL.
+  const res = await fetch(url, { headers: { Range: `bytes=${start}-${end}` }, signal: ctrl.signal, cache: 'no-store' });
   // A server that ignores Range would send the whole file; don't download it.
   if (res.status !== 206) { ctrl.abort(); throw new Error('Range not supported (' + res.status + ')'); }
   const total = Number((res.headers.get('Content-Range') || '').split('/')[1]) || 0;

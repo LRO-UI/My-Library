@@ -2,6 +2,19 @@
 // tracks as if they were a single timeline. Positions are global seconds.
 import { db } from './db.js';
 
+// After a stream fails: ask the server for the first bytes the same way the <audio>
+// element does, so the error says whether the server or the phone's decoder is at fault.
+async function probe(url) {
+  try {
+    const res = await fetch(url, { headers: { Range: 'bytes=0-1023' }, cache: 'no-store' });
+    const type = res.headers.get('Content-Type') || 'no type';
+    const body = res.ok ? '' : ' ' + (await res.text()).slice(0, 80);
+    return `server ${res.status}, ${type}${body}`;
+  } catch (e) {
+    return 'server unreachable';
+  }
+}
+
 export class Player {
   constructor({ onTime, onState, fileUrl }) {
     this.onTime = onTime;   // (id, pos)
@@ -63,8 +76,17 @@ export class Player {
     this.idx = i;
     this.el.src = src;
     await new Promise((resolve, reject) => {
-      this.el.addEventListener('loadedmetadata', resolve, { once: true });
-      this.el.addEventListener('error', () => reject(new Error(blob ? 'This audio format is not supported.' : 'Could not stream this audiobook. Check your connection and cloud settings.')), { once: true });
+      const ok = () => { this.el.removeEventListener('error', fail); resolve(); };
+      const fail = async () => {
+        this.el.removeEventListener('loadedmetadata', ok);
+        const err = this.el.error;
+        const why = err ? `code ${err.code}${err.message ? ': ' + err.message : ''}` : 'unknown';
+        console.warn('Audio load failed', src, err);
+        if (blob) return reject(new Error(`This audio format is not supported (${why}).`));
+        reject(new Error(`Could not stream this audiobook (${why}; ${await probe(src)}).`));
+      };
+      this.el.addEventListener('loadedmetadata', ok, { once: true });
+      this.el.addEventListener('error', fail, { once: true });
     });
     this.switching = false;
   }

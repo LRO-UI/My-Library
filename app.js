@@ -364,7 +364,7 @@ function App() {
     if (playingId === a.id) { player.pause(); return; }
     if (!a.tracks || !a.tracks.length) { flash('Add an audio file to play this CD'); edit(a, 'audio'); return; }
     setPref({ lastAudioId: a.id });
-    try { await player.play(a); } catch (e) { if (e.name !== 'AbortError') flash(e.message); }
+    try { await player.play(a); } catch (e) { if (e.name !== 'AbortError') flash(e.message, 10000); }
   };
   const skip = (a, d) => {
     if (player.item && player.item.id === a.id) { player.seek(player.pos() + d); return; }
