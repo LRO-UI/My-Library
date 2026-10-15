@@ -118,6 +118,77 @@ async function mp4Duration(url) {
   return 0;
 }
 
+// Cover art stored inside an audio file (MP4/M4B 'covr' atom or MP3 ID3 picture) as an
+// image Blob, or null. Takes a URL or a File, like readAudioDurations.
+export async function embeddedCover(src) {
+  const name = src instanceof Blob ? src.name || '' : new URL(src).pathname;
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  try {
+    if (['m4a', 'm4b', 'mp4'].includes(ext)) return await mp4Cover(src);
+    if (ext === 'mp3') return await id3Cover(src);
+  } catch (e) { console.warn('Cover read failed', name, e); }
+  return null;
+}
+
+// Child boxes of the box whose body spans start..end, read header by header.
+async function mp4Children(src, start, end) {
+  const out = [];
+  for (let pos = start; pos + 8 <= end && out.length < 256;) {
+    const { view } = await rangeBytes(src, pos, pos + 15);
+    if (view.byteLength < 8) break;
+    let size = view.getUint32(0), hdr = 8;
+    if (size === 1 && view.byteLength >= 16) { size = view.getUint32(8) * 2 ** 32 + view.getUint32(12); hdr = 16; }
+    else if (size === 0) size = end - pos;
+    if (size < 8) break;
+    out.push({ type: fourcc(view, 4), body: pos + hdr, end: pos + size });
+    pos += size;
+  }
+  return out;
+}
+
+// moov/udta/meta/ilst/covr/data → the image bytes (data's body starts with 8 bytes of type + locale).
+async function mp4Cover(src) {
+  const { total } = await rangeBytes(src, 0, 7);
+  const find = async (box, type, skip = 0) => (await mp4Children(src, box.body + skip, box.end)).find(b => b.type === type);
+  let box = { body: 0, end: total };
+  for (const [type, skip] of [['moov'], ['udta'], ['meta'], ['ilst', 4], ['covr'], ['data']]) {
+    box = await find(box, type, skip);
+    if (!box) return null;
+  }
+  const { view } = await rangeBytes(src, box.body, box.end - 1);
+  const kind = view.getUint32(0) & 0xffffff; // 13 JPEG, 14 PNG
+  return new Blob([new Uint8Array(view.buffer, view.byteOffset + 8, view.byteLength - 8)], { type: kind === 14 ? 'image/png' : 'image/jpeg' });
+}
+
+// ID3v2.2–2.4 'APIC'/'PIC' frame → the picture bytes.
+async function id3Cover(src) {
+  const { view: h } = await rangeBytes(src, 0, 9);
+  if (h.byteLength < 10 || fourcc(h, 0).slice(0, 3) !== 'ID3') return null;
+  const ver = h.getUint8(3);
+  const syncsafe = (v, i) => (v.getUint8(i) << 21) | (v.getUint8(i + 1) << 14) | (v.getUint8(i + 2) << 7) | v.getUint8(i + 3);
+  const { view: t } = await rangeBytes(src, 10, 10 + syncsafe(h, 6) - 1);
+  const bytes = new Uint8Array(t.buffer, t.byteOffset, t.byteLength);
+  let p = h.getUint8(5) & 0x40 ? 4 + (ver === 4 ? syncsafe(t, 0) - 4 : t.getUint32(0)) : 0; // extended header
+  const idLen = ver === 2 ? 3 : 4, hdrLen = ver === 2 ? 6 : 10;
+  while (p + hdrLen <= bytes.length && bytes[p]) {
+    const id = String.fromCharCode(...bytes.subarray(p, p + idLen));
+    const size = ver === 2 ? (bytes[p + 3] << 16) | (bytes[p + 4] << 8) | bytes[p + 5] : ver === 4 ? syncsafe(t, p + 4) : t.getUint32(p + 4);
+    const body = bytes.subarray(p + hdrLen, p + hdrLen + size);
+    p += hdrLen + size;
+    if (id !== 'APIC' && id !== 'PIC') continue;
+    const enc = body[0];
+    let i = 1, mime;
+    if (id === 'PIC') { mime = /png/i.test(String.fromCharCode(...body.subarray(1, 4))) ? 'image/png' : 'image/jpeg'; i = 4; }
+    else { const z = body.indexOf(0, 1); mime = String.fromCharCode(...body.subarray(1, z)) || 'image/jpeg'; i = z + 1; }
+    i++; // picture type
+    if (enc === 1 || enc === 2) { while (i + 1 < body.length && (body[i] || body[i + 1])) i += 2; i += 2; } // UTF-16 description
+    else { while (i < body.length && body[i]) i++; i++; }
+    if (!mime.includes('/')) mime = 'image/' + mime.toLowerCase().replace('jpg', 'jpeg');
+    return new Blob([body.slice(i)], { type: mime });
+  }
+  return null;
+}
+
 // MP3: skip the ID3 tag, find the first frame, then use its Xing/Info or VBRI frame count;
 // without one the file is constant bitrate and the length follows from its size.
 async function mp3Duration(url) {

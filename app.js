@@ -1,7 +1,7 @@
 import { html, render, Component, useState, useEffect, useRef, useMemo } from 'https://unpkg.com/htm@3.1.1/preact/standalone.module.js';
 import { db } from './db.js';
 import { SEED_BOOKS, SEED_AUDIO, SEED_TAGS, RETIRED_SEEDS } from './seed.js';
-import { importBookFile, readAudioTracks, readAudioDurations, scaleImage, stripExt } from './importers.js';
+import { importBookFile, readAudioTracks, readAudioDurations, embeddedCover, scaleImage, stripExt } from './importers.js';
 import { Player } from './player.js';
 import { exportBackup, readBackup, backupName, download } from './backup.js';
 import { folderSupported, pickFolder, savedFolder, folderAccess, folderFile, scanFolder } from './folder.js';
@@ -32,6 +32,8 @@ async function cloudFetch(url) {
   if (!res.ok) throw new Error(`The cloud server answered ${res.status}.`);
   return res;
 }
+// Cover art stored inside an audio file (URL or File) as a scaled data URL, or ''.
+const embeddedImage = async src => { try { const b = await embeddedCover(src); return b ? await scaleImage(b) : ''; } catch (e) { return ''; } };
 const fmtBytes = n =>(n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n >= 1e6 ? Math.round(n / 1e6) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' KB');
 
 const newDraft = kind => kind === 'audio'
@@ -616,10 +618,12 @@ function App() {
         const tracks = c.tracks.map((t, j) => ({ name: t.name, key: t.key, dur: durs[j] })).filter(t => t.dur > 0);
         if (!tracks.length) { console.warn(c.id, 'no playable tracks'); failed.push(c.title); continue; }
         const rec = { id: 'a' + Date.now() + i, cloud: c.id, title: c.title, author: 'Unknown', color: SWATCHES[(audioRef.current.length + i) % SWATCHES.length][1],
-          tags: [], image: await cover(c.cover), showText: true, tracks, len: tracks.reduce((sum, t) => sum + t.dur, 0), pos: 0 };
+          tags: [], image: (await cover(c.cover)) || (await embeddedImage(cloudFile(p, tracks[0].key))), coverTried: true,
+          showText: true, tracks, len: tracks.reduce((sum, t) => sum + t.dur, 0), pos: 0 };
         setAudio(list => [...list, rec]);
         na++;
       }
+      await fillCovers(a => a.cloud, t => cloudFile(p, t.key));
 
       const added = [nb && plural(nb, 'book', 'books'), na && plural(na, 'audiobook', 'audiobooks')].filter(Boolean);
       if (failed.length) flash(`${added.length ? 'Added ' + added.join(' and ') + ' · ' : ''}Could not add: ${failed.join(', ')}. Tap Sync now to retry.`, 8000);
@@ -634,6 +638,15 @@ function App() {
     }
   };
   useEffect(() => { if (ready) syncCloud(true); }, [ready]);
+
+  // Audiobooks added without a cover get the one stored inside their first track; each is tried once.
+  const fillCovers = async (match, srcOf) => {
+    for (const a of audioRef.current.filter(x => match(x) && !x.image && !x.coverTried && x.tracks && x.tracks.length)) {
+      let image = '';
+      try { image = await embeddedImage(await srcOf(a.tracks[0])); } catch (e) { /* track gone */ }
+      setAudio(list => list.map(x => (x.id === a.id ? { ...x, image: x.image || image, coverTried: true } : x)));
+    }
+  };
 
   // --- Audiobooks folder on the device ---
   // Adds audiobooks found in the folder that aren't on the shelf yet. Their tracks keep a
@@ -661,11 +674,13 @@ function App() {
           if (!tracks.length) { failed.push(c.title); continue; }
           let image = '';
           try { if (c.cover) image = await scaleImage(await folderFile(dir, c.cover)); } catch (e) { /* no cover */ }
+          if (!image) image = await embeddedImage(files[0]);
           const rec = { id: 'a' + Date.now() + 'f' + i, folder: c.id, title: c.title, author: 'Unknown', color: SWATCHES[(audioRef.current.length + i) % SWATCHES.length][1],
-            tags: [], image, showText: true, tracks, len: tracks.reduce((sum, t) => sum + t.dur, 0), pos: 0 };
+            tags: [], image, coverTried: true, showText: true, tracks, len: tracks.reduce((sum, t) => sum + t.dur, 0), pos: 0 };
           setAudio(list => [...list, rec]);
         } catch (e) { console.warn(c.id, e); failed.push(c.title); }
       }
+      await fillCovers(a => a.folder, t => folderFile(dir, t.path));
       const added = fresh.length - failed.length;
       if (failed.length) flash(`${added ? `Added ${plural(added, 'audiobook', 'audiobooks')} · ` : ''}Could not add: ${failed.join(', ')}`, 8000);
       else if (added) flash(`Added ${plural(added, 'audiobook', 'audiobooks')} from your folder`);
