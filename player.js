@@ -28,7 +28,9 @@ export class Player {
     this.switching = false;
 
     this.el.addEventListener('timeupdate', () => {
-      if (this.item && !this.switching) this.onTime(this.item.id, this.pos());
+      // idx < 0: a new item is set but its first track isn't loaded yet; this event is
+      // left over from the previous source being cleared.
+      if (this.item && !this.switching && this.idx >= 0) this.onTime(this.item.id, this.pos());
     });
     this.el.addEventListener('play', () => this.item && this.onState(this.item.id));
     this.el.addEventListener('pause', () => {
@@ -38,7 +40,7 @@ export class Player {
     this.initSession();
   }
 
-  pos() { return this.item ? this.starts[this.idx] + this.el.currentTime : 0; }
+  pos() { return this.item && this.idx >= 0 ? this.starts[this.idx] + this.el.currentTime : 0; }
 
   async play(item) {
     if (!this.item || this.item.id !== item.id) {
@@ -46,7 +48,7 @@ export class Player {
       this.item = item;
       let t = 0;
       this.starts = item.tracks.map(tr => { const s = t; t += tr.dur; return s; });
-      await this.seek(item.pos >= item.len ? 0 : item.pos);
+      await this.seek(!(item.pos < item.len) ? 0 : item.pos); // also restarts a NaN position
     }
     this.updateSession();
     await this.el.play();
@@ -56,7 +58,7 @@ export class Player {
 
   async seek(pos) {
     if (!this.item) return;
-    pos = Math.max(0, Math.min(pos, this.item.len));
+    pos = Math.max(0, Math.min(Number.isFinite(pos) ? pos : 0, this.item.len));
     let i = this.starts.length - 1;
     while (i > 0 && this.starts[i] > pos) i--;
     if (i !== this.idx) await this.load(i);

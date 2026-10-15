@@ -204,7 +204,8 @@ function App() {
       let b = null, a = null, t = null, seedVersion = null;
       try { [b, a, t, seedVersion] = await Promise.all([db.get('books'), db.get('audio'), db.get('tags'), db.get('seedVersion')]); } catch (e) { console.warn('Could not open storage', e); }
       let bookList = (b || SEED_BOOKS).map(withTags);
-      let audioList = (a || SEED_AUDIO).map(withTags);
+      // Positions saved as NaN by an older player bug restart at 0.
+      let audioList = (a || SEED_AUDIO).map(withTags).map(x => (Number.isFinite(x.pos) ? x : { ...x, pos: 0 }));
       try {
         // Older installs: drop sample items that were never edited.
         if (b && seedVersion !== SEED_VERSION) {
