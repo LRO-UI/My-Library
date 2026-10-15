@@ -1,7 +1,7 @@
 // Turns user files into library content.
 //   importBookFile(file)     → { title, author, image, chapters: [{ title, paras }] }
 //   readAudioTracks(files)   → [{ name, dur }]   (seconds)
-//   readAudioDurations(urls) → [dur]             (seconds, for cloud tracks)
+//   readAudioDurations(srcs) → [dur]             (seconds, for cloud tracks or files in a device folder)
 //   scaleImage(fileOrBlob)   → JPEG data URL, long edge ≤ 700px
 
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
@@ -48,19 +48,22 @@ export function readAudioTracks(files) {
 // from the file header with a few small Range requests; other formats (and any header that
 // can't be parsed) fall back to loading the track's metadata in an <audio> element, which
 // phones can be slow or unwilling to do in the background.
+// Also takes File objects (tracks read in place from a folder on the device).
 export async function readAudioDurations(urls) {
   const durationOf = async url => {
-    const ext = (new URL(url).pathname.split('.').pop() || '').toLowerCase();
+    const name = url instanceof Blob ? url.name || '' : new URL(url).pathname;
+    const ext = (name.split('.').pop() || '').toLowerCase();
     try {
       const dur = ext === 'mp3' ? await mp3Duration(url) : ['m4a', 'm4b', 'mp4'].includes(ext) ? await mp4Duration(url) : 0;
       if (dur > 0) return dur;
-    } catch (e) { console.warn('Header read failed', url, e); }
+    } catch (e) { console.warn('Header read failed', name, e); }
     return elementDuration(url);
   };
-  const elementDuration = url => new Promise(resolve => {
+  const elementDuration = src => new Promise(resolve => {
     const a = new Audio();
+    const url = src instanceof Blob ? URL.createObjectURL(src) : src;
     const timer = setTimeout(() => done(0), 120000);
-    const done = dur => { clearTimeout(timer); a.removeAttribute('src'); a.load(); resolve(dur); };
+    const done = dur => { clearTimeout(timer); a.removeAttribute('src'); a.load(); if (url !== src) URL.revokeObjectURL(url); resolve(dur); };
     a.preload = 'metadata';
     a.onloadedmetadata = () => done(isFinite(a.duration) ? a.duration : 0);
     a.onerror = () => done(0);
@@ -73,8 +76,9 @@ export async function readAudioDurations(urls) {
   return out;
 }
 
-// Bytes start..end of a remote file, plus the file's total size.
+// Bytes start..end of a remote (or local) file, plus the file's total size.
 async function rangeBytes(url, start, end) {
+  if (url instanceof Blob) return { view: new DataView(await url.slice(start, end + 1).arrayBuffer()), total: url.size };
   const ctrl = new AbortController();
   // no-store: tiny cached fragments of the file would otherwise be stitched into the
   // <audio> element's later stream of the same URL.

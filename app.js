@@ -4,6 +4,7 @@ import { SEED_BOOKS, SEED_AUDIO, SEED_TAGS, RETIRED_SEEDS } from './seed.js';
 import { importBookFile, readAudioTracks, readAudioDurations, scaleImage, stripExt } from './importers.js';
 import { Player } from './player.js';
 import { exportBackup, readBackup, backupName, download } from './backup.js';
+import { folderSupported, pickFolder, savedFolder, folderAccess, folderFile, scanFolder } from './folder.js';
 
 // ===== Constants =====
 const PREFS_KEY = 'my-library-prefs-v1';  // { theme, fontSize, lastId, lastAudioId }
@@ -194,6 +195,9 @@ function App() {
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
   const syncing = useRef(false);
+  const [folderDir, setFolderDir] = useState(null); // handle of the device folder audiobooks are read from
+  const folderRef = useRef(null);
+  folderRef.current = folderDir;
 
   const isDark = prefs.theme === 'dark';
   const setPref = patch => setPrefs(p => ({ ...p, ...patch }));
@@ -222,6 +226,7 @@ function App() {
       setBooks(bookList.map(withoutText));
       setAudio(audioList);
       setTags(t || SEED_TAGS);
+      if (folderSupported()) setFolderDir(await savedFolder());
       setReady(true);
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
     })();
@@ -274,6 +279,13 @@ function App() {
     // Its own URL (the Worker ignores `play`), so playback never reuses small fragments
     // the phone cached from the length probes at sync time.
     fileUrl: key => cloudFile(prefsRef.current, key) + '&play=1',
+    // Runs from the play tap, so the browser may show its "allow access" prompt here.
+    openFile: async path => {
+      const dir = folderRef.current;
+      if (!dir) throw new Error('Choose your audiobooks folder in Library to play this.');
+      if (!(await folderAccess(dir, true))) throw new Error('Allow access to your audiobooks folder to play this.');
+      try { return await folderFile(dir, path); } catch (e) { throw new Error('This audiobook is no longer in your audiobooks folder.'); }
+    },
   }), []);
 
   // --- Android back button: each overlay pushes a history entry ---
@@ -503,8 +515,11 @@ function App() {
 
   const deleteItem = async () => {
     const d = draft;
-    if (!d || !d.id || !confirm(`Delete “${d.title}” from your library?${d.cloud ? ' It stays in your cloud bucket but won’t be synced again.' : ''}`)) return;
+    if (!d || !d.id) return;
+    const where = d.cloud ? ' It stays in your cloud bucket but won’t be synced again.' : d.folder ? ' It stays on your phone but won’t be added again.' : '';
+    if (!confirm(`Delete “${d.title}” from your library?${where}`)) return;
     if (d.cloud) setPref({ cloudHidden: [...(prefs.cloudHidden || []), d.cloud] });
+    if (d.folder) setPref({ folderHidden: [...(prefs.folderHidden || []), d.folder] });
     if (d.kind === 'book') {
       const rest = books.filter(b => b.id !== d.id);
       setBooks(rest);
@@ -620,6 +635,61 @@ function App() {
   };
   useEffect(() => { if (ready) syncCloud(true); }, [ready]);
 
+  // --- Audiobooks folder on the device ---
+  // Adds audiobooks found in the folder that aren't on the shelf yet. Their tracks keep a
+  // `path` and are opened from the folder when played; nothing is copied. Items removed
+  // from the shelf stay in `folderHidden`. `ask` (from a tap) may show the access prompt.
+  const scanning = useRef(false);
+  const syncFolder = async ({ quiet = false, ask = false, dir = folderRef.current } = {}) => {
+    if (!dir || scanning.current) return;
+    scanning.current = true;
+    const say = msg => { if (!quiet) setToast(msg); };
+    try {
+      if (!(await folderAccess(dir, ask))) { if (!quiet) flash('Allow access to the folder to look for audiobooks.'); return; }
+      say('Looking for audiobooks…');
+      const found = await scanFolder(dir);
+      const hidden = new Set(prefsRef.current.folderHidden || []);
+      const have = new Set(audioRef.current.map(a => a.folder).filter(Boolean));
+      const fresh = found.filter(c => !have.has(c.id) && !hidden.has(c.id));
+      const failed = [];
+      for (const [i, c] of fresh.entries()) {
+        setToast(`Adding audiobooks… ${i + 1} of ${fresh.length}`);
+        try {
+          const files = await Promise.all(c.tracks.map(t => folderFile(dir, t.path)));
+          const durs = await readAudioDurations(files);
+          const tracks = c.tracks.map((t, j) => ({ ...t, dur: durs[j] })).filter(t => t.dur > 0);
+          if (!tracks.length) { failed.push(c.title); continue; }
+          let image = '';
+          try { if (c.cover) image = await scaleImage(await folderFile(dir, c.cover)); } catch (e) { /* no cover */ }
+          const rec = { id: 'a' + Date.now() + 'f' + i, folder: c.id, title: c.title, author: 'Unknown', color: SWATCHES[(audioRef.current.length + i) % SWATCHES.length][1],
+            tags: [], image, showText: true, tracks, len: tracks.reduce((sum, t) => sum + t.dur, 0), pos: 0 };
+          setAudio(list => [...list, rec]);
+        } catch (e) { console.warn(c.id, e); failed.push(c.title); }
+      }
+      const added = fresh.length - failed.length;
+      if (failed.length) flash(`${added ? `Added ${plural(added, 'audiobook', 'audiobooks')} · ` : ''}Could not add: ${failed.join(', ')}`, 8000);
+      else if (added) flash(`Added ${plural(added, 'audiobook', 'audiobooks')} from your folder`);
+      else if (!quiet) flash('No new audiobooks in your folder');
+      else setToast('');
+    } catch (e) {
+      console.warn('Folder scan failed', e);
+      if (!quiet) flash('Could not read the folder: ' + e.message);
+    } finally {
+      scanning.current = false;
+    }
+  };
+  useEffect(() => { if (ready) syncFolder({ quiet: true }); }, [ready]);
+
+  const chooseFolder = async () => {
+    try {
+      const dir = await pickFolder();
+      setFolderDir(dir);
+      await syncFolder({ dir });
+    } catch (e) {
+      if (e.name !== 'AbortError') flash('Could not open that folder: ' + e.message);
+    }
+  };
+
   // --- Backup & restore ---
   const onExport = async () => {
     try {
@@ -648,8 +718,8 @@ function App() {
       let missing = 0;
       for (const a of data.audio.map(withTags)) {
         let rec = a;
-        // Cloud tracks (with a `key`) stream from the server and have no blobs to restore.
-        if (a.tracks && a.tracks.length && a.tracks.some(t => !t.key)) {
+        // Cloud tracks (with a `key`) and folder tracks (with a `path`) have no blobs to restore.
+        if (a.tracks && a.tracks.length && a.tracks.some(t => !t.key && !t.path)) {
           const blobs = await Promise.all(a.tracks.map((_, i) => getAudio(a.id, i)));
           if (blobs.every(Boolean)) {
             if (player.item && player.item.id === a.id) player.stop();
@@ -894,6 +964,20 @@ function App() {
             Bring back ${plural(prefs.cloudHidden.length, 'deleted cloud item', 'deleted cloud items')}
           </button>`}
         <p class="hint">New books and audiobooks in your bucket are added each time the app opens. Books are downloaded so they work offline; audiobooks stream.</p>
+      </div>
+      <div class="field">
+        <span class="label">Audiobooks on this phone</span>
+        ${folderSupported() ? html`
+          ${folderDir && html`<button class="btn-soft" onClick=${() => syncFolder({ ask: true })}><${I.headphones} size="17" sw="2" /> Look for new audiobooks in “${folderDir.name}”</button>`}
+          <button class=${folderDir ? 'link-btn' : 'btn-soft'} style=${folderDir ? 'align-self:flex-start;' : ''} onClick=${chooseFolder}>
+            ${folderDir ? 'Choose a different folder' : html`<${I.upload} size="17" /> Choose audiobooks folder`}
+          </button>
+          ${(prefs.folderHidden || []).length > 0 && html`
+            <button class="link-btn" style="align-self:flex-start;" onClick=${() => { setPref({ folderHidden: [] }); setTimeout(() => syncFolder({ ask: true })); }}>
+              Bring back ${plural(prefs.folderHidden.length, 'deleted audiobook', 'deleted audiobooks')}
+            </button>`}
+          <p class="hint">Audiobooks play straight from the folder, nothing is copied. Each .m4b file, and each folder of MP3s, becomes one audiobook. Ones already on your shelf are skipped.</p>`
+        : html`<p class="hint">This browser can't open folders. Use Chrome on Android (version 132 or newer).</p>`}
       </div>
       <div class="field">
         <span class="label">Backup</span>

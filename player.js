@@ -16,10 +16,11 @@ async function probe(url) {
 }
 
 export class Player {
-  constructor({ onTime, onState, fileUrl }) {
+  constructor({ onTime, onState, fileUrl, openFile }) {
     this.onTime = onTime;   // (id, pos)
     this.onState = onState; // (id | null) — the id that is playing now
     this.fileUrl = fileUrl; // (key) → streaming URL for a cloud track
+    this.openFile = openFile; // async (path) → File, for a track read in place from a device folder
     this.el = new Audio();
     this.el.preload = 'auto';
     this.item = null;
@@ -67,9 +68,11 @@ export class Player {
   }
 
   async load(i) {
-    // Cloud tracks stream from the server unless a copy is stored on the device.
+    // A copy stored in the app wins; otherwise cloud tracks stream from the server and
+    // folder tracks are opened where they are on the device.
     const track = this.item.tracks[i];
-    const blob = await db.getFile(`${this.item.id}:${i}`);
+    let blob = await db.getFile(`${this.item.id}:${i}`);
+    if (!blob && track.path) blob = await this.openFile(track.path);
     if (!blob && !track.key) throw new Error('The audio file for this CD is missing. Re-add it in the editor.');
     const src = blob ? URL.createObjectURL(blob) : this.fileUrl(track.key);
     this.switching = true;
