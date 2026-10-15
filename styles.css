@@ -64,11 +64,13 @@ h1, h2, h3, p { margin: 0; }
 .press:active { transform: scale(0.97); }
 
 /* ===== Shell ===== */
+/* Pinned to the viewport so the tab bar never scrolls away. viewport-fit=cover
+   (index.html) makes env(safe-area-inset-*) report Android's status and
+   navigation bars, so the tab bar pads itself above the system buttons. */
 .shell {
-  position: relative;
+  position: fixed;
+  top: 0; bottom: 0; left: 0; right: 0;
   max-width: 480px;
-  height: 100vh;
-  height: 100dvh;
   margin: 0 auto;
   background: var(--w-app);
   display: flex;
@@ -487,7 +489,8 @@ input[type="search"]::-webkit-search-cancel-button { display: none; }
 /* ===== Audio tab ===== */
 .continue.listen { grid-template-columns: 110px minmax(0,1fr); }
 .btn-coral.lav { background: var(--lavender); box-shadow: 0 8px 20px rgba(140,123,196,0.30); }
-.grid.cds { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 30px 16px; padding-top: 24px; }
+/* Same columns as the book grid, so CDs sit two per row like the books. */
+.grid.cds { gap: 30px 14px; padding-top: 24px; }
 .add-tile.square { aspect-ratio: 1/1; }
 
 /* ===== Tags ===== */
