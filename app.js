@@ -270,7 +270,9 @@ function App() {
       return list.map(x => (x.id === id ? { ...x, pos } : x));
     }),
     onState: id => setPlayingId(id),
-    fileUrl: key => cloudFile(prefsRef.current, key),
+    // Its own URL (the Worker ignores `play`), so playback never reuses small fragments
+    // the phone cached from the length probes at sync time.
+    fileUrl: key => cloudFile(prefsRef.current, key) + '&play=1',
   }), []);
 
   // --- Android back button: each overlay pushes a history entry ---
